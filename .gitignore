@@ -1,0 +1,39 @@
+.DS_Store
+.claude/
+.mcp.json
+CLAUDE.md
+
+# local config + secrets
+.env
+.env.*
+!.env.example
+.envrc
+.direnv/
+.npmrc
+*.local
+*.log
+cookies.txt
+*.cookie
+*.cookies
+*.session
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# editors
+.idea/
+.vscode/
+*.code-workspace
+
+# build + deps
+dist/
+node_modules/
+*.tsbuildinfo
+coverage/
+.turbo/
+.cache/
+tmp/
+dev-docs/

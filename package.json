@@ -1,0 +1,61 @@
+{
+  "name": "@sura_ai/chemotion-mcp",
+  "version": "0.2.0-alpha.0",
+  "description": "Model Context Protocol server for Chemotion ELN (electronic lab notebook). Search, read, and write samples, reactions, research plans, wellplates, and collections from any MCP-aware AI client.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "sura-chemotion-mcp": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "smoke": "tsx scripts/smoke.ts",
+    "prepublishOnly": "npm run typecheck && npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "chemotion",
+    "eln",
+    "electronic-lab-notebook",
+    "chemistry",
+    "laboratory",
+    "research",
+    "science",
+    "anthropic",
+    "claude",
+    "ai"
+  ],
+  "author": "bstn",
+  "license": "MIT"
+}
