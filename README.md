@@ -1,8 +1,8 @@
-# @sura_ai/chemotion-mcp
+# @sura_ai/chemotion
 
 Model Context Protocol server for Chemotion ELN. It gives MCP-aware clients a typed Chemotion connector for collections, samples, reactions, research plans, wellplates, screens, attachments, and search.
 
-Status: `0.2.0-alpha.0`. The API surface is reverse-engineered from Chemotion's `api/v1` routes and verified against a live Chemotion 1.x deployment.
+Status: `0.1.0`. The API surface is reverse-engineered from Chemotion's `api/v1` routes and verified against a live Chemotion 1.x deployment.
 
 ## Features
 
@@ -16,13 +16,13 @@ Status: `0.2.0-alpha.0`. The API surface is reverse-engineered from Chemotion's 
 ## Install
 
 ```bash
-npm install @sura_ai/chemotion-mcp
+npm install @sura_ai/chemotion
 ```
 
 Or run it directly:
 
 ```bash
-npx -y @sura_ai/chemotion-mcp
+npx -y @sura_ai/chemotion
 ```
 
 ## Configuration
@@ -63,7 +63,7 @@ Write tools are off by default. Destructive tools require both `CHEMOTION_ALLOW_
   "mcpServers": {
     "chemotion": {
       "command": "npx",
-      "args": ["-y", "@sura_ai/chemotion-mcp"],
+      "args": ["-y", "@sura_ai/chemotion"],
       "env": {
         "CHEMOTION_BASE_URL": "https://eln.example.org",
         "CHEMOTION_USERNAME": "you@example.org",

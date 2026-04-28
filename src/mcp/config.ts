@@ -45,7 +45,7 @@ function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value || !value.trim()) {
     throw new ChemotionMcpConfigError(
-      `Missing required env var ${name}. See the README of @sura_ai/chemotion-mcp.`
+      `Missing required env var ${name}. See the README of @sura_ai/chemotion.`
     );
   }
   return value.trim();
@@ -122,7 +122,7 @@ export function loadConfig(): ChemotionMcpConfig {
   const timeoutMs = Number.isFinite(parsedTimeout) ? parsedTimeout : undefined;
 
   const userAgent =
-    optionalTrim('CHEMOTION_USER_AGENT') ?? 'sura-chemotion-mcp/0.2.0';
+    optionalTrim('CHEMOTION_USER_AGENT') ?? 'sura-chemotion-mcp/0.1.0';
 
   return {
     baseUrl,

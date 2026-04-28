@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * Smoke-test harness for @sura_ai/chemotion-mcp.
+ * Smoke-test harness for @sura_ai/chemotion.
  *
  * Phase 1: exercises config parse + auth bootstrap + session probe.
  * Phase 2 will extend this to list collections and dump a sample.

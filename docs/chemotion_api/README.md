@@ -1,7 +1,7 @@
 # Chemotion JSON API — Reverse-Engineered Reference
 
 Notes on the Chemotion ELN REST API, assembled while building the
-`@sura_ai/chemotion-mcp` server. Treat this as a **field guide**, not
+`@sura_ai/chemotion` server. Treat this as a **field guide**, not
 an authoritative spec — Chemotion's own public docs are thin and
 version-drift between releases is real.
 
