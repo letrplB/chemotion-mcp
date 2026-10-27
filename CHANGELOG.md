@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-10-27
 
 Review against the Chemotion ELN source (v1.10 – v4.0.0).
 

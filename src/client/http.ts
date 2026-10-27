@@ -234,7 +234,7 @@ async function doFetch(
 
   const headers: Record<string, string> = {
     Accept: options.accept ?? 'application/json',
-    'User-Agent': config.userAgent ?? 'sura-chemotion-mcp/0.1.0',
+    'User-Agent': config.userAgent ?? 'sura-chemotion-mcp/0.2.0',
     ...options.headers,
   };
 

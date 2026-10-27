@@ -2,7 +2,7 @@
 
 Model Context Protocol server for Chemotion ELN. It gives MCP-aware clients a typed Chemotion connector for collections, samples, reactions, research plans, wellplates, screens, attachments, and search.
 
-Status: `0.1.0`. Chemotion publishes no API reference, so the API surface is reverse-engineered from the Grape routes in [ComPlat/chemotion_ELN](https://github.com/ComPlat/chemotion_ELN). It was verified live against a pre-v4 deployment and checked against the v4.0.0 source (2026-10). Chemotion v4 changed the collection API; the client supports both versions.
+Status: `0.2.0`. Chemotion publishes no API reference, so the API surface is reverse-engineered from the Grape routes in [ComPlat/chemotion_ELN](https://github.com/ComPlat/chemotion_ELN). It was verified live against a pre-v4 deployment and checked against the v4.0.0 source (2026-10). Chemotion v4 changed the collection API; the client supports both versions.
 
 ## Features
 

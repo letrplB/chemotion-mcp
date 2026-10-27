@@ -128,7 +128,7 @@ export function loadConfig(): ChemotionMcpConfig {
   const timeoutMs = parsedTimeout > 0 ? parsedTimeout : undefined;
 
   const userAgent =
-    optionalTrim('CHEMOTION_USER_AGENT') ?? 'sura-chemotion-mcp/0.1.0';
+    optionalTrim('CHEMOTION_USER_AGENT') ?? 'sura-chemotion-mcp/0.2.0';
 
   return {
     baseUrl,

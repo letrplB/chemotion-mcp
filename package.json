@@ -1,6 +1,6 @@
 {
   "name": "@sura_ai/chemotion",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Model Context Protocol server for Chemotion ELN (electronic lab notebook). Search, read, and write samples, reactions, research plans, wellplates, and collections from any MCP-aware AI client.",
   "type": "module",
   "main": "./dist/index.js",
