@@ -11,7 +11,8 @@
  *
  * Tool descriptions are what the model sees at discovery time —
  * they name the use-case, spell out args, and flag the important
- * defaults (pagination, collection scoping, body format).
+ * defaults (pagination, collection scoping, body format). Annotations
+ * (`READ`, `CATALOG`) tell clients which calls are safe to auto-approve.
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -33,7 +34,6 @@ import {
   EMPTY_ROOT_CONTAINER,
   ELEMENT_TYPE_PLURAL,
   formatCollection,
-  formatContainerTree,
   formatReaction,
   formatResearchPlan,
   formatSample,
@@ -41,6 +41,8 @@ import {
   formatWellplate,
 } from '../../client/index.js';
 import {
+  READ,
+  CATALOG,
   collectionIdSchema,
   elementKindSchema,
   errorText,
@@ -558,13 +560,17 @@ export function registerReadTools(
   // Identity
   // -----------------------------------------------------------------
 
-  server.tool(
+  server.registerTool(
     'chem_me',
-    'Return the authenticated caller’s user record (id, name, initials, email). ' +
-      'Useful as an authn sanity-check before heavier calls. ' +
-      '`chem_me` is exempt from the `CHEMOTION_REVEAL_USER_IDENTITIES` privacy flag ' +
-      '(the caller is looking up themselves).',
-    {},
+    {
+      title: 'Who am I',
+      description:
+        'Return the authenticated caller’s user record (id, name, initials, email). ' +
+        'Useful as an authn sanity-check before heavier calls. ' +
+        '`chem_me` is exempt from the `CHEMOTION_REVEAL_USER_IDENTITIES` privacy flag ' +
+        '(the caller is looking up themselves).',
+      annotations: READ,
+    },
     async () =>
       guard(
         () => client.me(),
@@ -592,12 +598,16 @@ export function registerReadTools(
   // Collections
   // -----------------------------------------------------------------
 
-  server.tool(
+  server.registerTool(
     'chem_list_collections',
-    'List every collection visible to the caller (own + shared + the locked ' +
-      '"All" system collection), as a flat summary with parent links. ' +
-      'Use a collection id from here as `collection_id` on the `chem_list_*` tools.',
-    {},
+    {
+      title: 'List collections',
+      description:
+        'List every collection visible to the caller (own + shared + the locked ' +
+        '"All" system collection), as a flat summary with parent links. ' +
+        'Use a collection id from here as `collection_id` on the `chem_list_*` tools.',
+      annotations: READ,
+    },
     async () =>
       guard(
         () => client.listCollections(),
@@ -629,16 +639,20 @@ export function registerReadTools(
       )
   );
 
-  server.tool(
+  server.registerTool(
     'chem_get_collection',
-    'Fetch one collection with its immediate children. Use this to walk the ' +
-      'collection tree one level at a time, or to confirm a collection id before ' +
-      'listing its elements.',
     {
-      id: positiveInt.describe('Collection id.'),
+      title: 'Get collection',
+      description:
+        'Fetch one collection with its immediate children. Use this to walk the ' +
+        'collection tree one level at a time, or to confirm a collection id before ' +
+        'listing its elements.',
+      inputSchema: {
+        id: positiveInt.describe('Collection id.'),
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const { id } = args as { id: number };
+    async ({ id }) => {
       return guard(
         () => client.getCollection(id),
         (response) => text(formatCollection(response.collection, formatOpts))
@@ -650,37 +664,34 @@ export function registerReadTools(
   // Samples
   // -----------------------------------------------------------------
 
-  server.tool(
+  server.registerTool(
     'chem_list_samples',
-    'List samples in a collection. Requires `collection_id` (Chemotion does not ' +
-      'expose a cross-collection list — use `chem_search` for that). Results are ' +
-      'rendered as one line per sample with formula + MW; use `chem_get_sample` ' +
-      'for full structure/quantity/analyses detail.',
     {
-      collection_id: collectionIdSchema,
-      ...paginationArgsSchema,
-      from_date: z
-        .string()
-        .optional()
-        .describe('Created-on lower bound, ISO date (e.g. "2026-01-31").'),
-      to_date: z
-        .string()
-        .optional()
-        .describe('Created-on upper bound, ISO date (inclusive day).'),
-      product_only: z
-        .boolean()
-        .optional()
-        .describe('Hide samples that are not reaction products.'),
+      title: 'List samples',
+      description:
+        'List samples in a collection. Requires `collection_id` (Chemotion does not ' +
+        'expose a cross-collection list — use `chem_search` for that). Results are ' +
+        'rendered as one line per sample with formula + MW; use `chem_get_sample` ' +
+        'for full structure/quantity/analyses detail.',
+      inputSchema: {
+        collection_id: collectionIdSchema,
+        ...paginationArgsSchema,
+        from_date: z
+          .string()
+          .optional()
+          .describe('Created-on lower bound, ISO date (e.g. "2026-01-31").'),
+        to_date: z
+          .string()
+          .optional()
+          .describe('Created-on upper bound, ISO date (inclusive day).'),
+        product_only: z
+          .boolean()
+          .optional()
+          .describe('Hide samples that are not reaction products.'),
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const input = args as {
-        collection_id: number | 'all';
-        page?: number;
-        per_page?: number;
-        from_date?: string;
-        to_date?: string;
-        product_only?: boolean;
-      };
+    async (input) => {
       return guard(
         () =>
           client.listSamples({
@@ -700,18 +711,22 @@ export function registerReadTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'chem_get_sample',
-    'Fetch one sample. Returns the full chemistry view: SMILES, InChI, InChIKey, ' +
-      'molecular formula, molecular weight, a fenced molfile block, quantities ' +
-      '(amount / real / target / purity / density / molarity / MP / BP / solvents), ' +
-      'description, and the analyses tree (NMR / MS / IR …). Chemotion hydrates ' +
-      'all of these in a single round-trip — there is no `include` arg.',
     {
-      id: positiveInt.describe('Sample id.'),
+      title: 'Get sample',
+      description:
+        'Fetch one sample. Returns the full chemistry view: SMILES, InChI, InChIKey, ' +
+        'molecular formula, molecular weight, a fenced molfile block, quantities ' +
+        '(amount / real / target / purity / density / molarity / MP / BP / solvents), ' +
+        'description, and the analyses tree (NMR / MS / IR …). Chemotion hydrates ' +
+        'all of these in a single round-trip — there is no `include` arg.',
+      inputSchema: {
+        id: positiveInt.describe('Sample id.'),
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const { id } = args as { id: number };
+    async ({ id }) => {
       return guard(
         () => client.getSample(id),
         (response) => text(formatSample(response.sample, formatOpts))
@@ -719,16 +734,20 @@ export function registerReadTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'chem_get_sample_by_short_label',
-    'Resolve a human-readable short label (e.g. "ABC-42") to a sample and return ' +
-      'its full chemistry view. Two-hop under the hood: `findByShortLabel` → ' +
-      '`get_sample`.',
     {
-      short_label: z.string().min(1).describe('Sample short_label.'),
+      title: 'Get sample by short label',
+      description:
+        'Resolve a human-readable short label (e.g. "ABC-42") to a sample and return ' +
+        'its full chemistry view. Two-hop under the hood: `findByShortLabel` → ' +
+        '`get_sample`.',
+      inputSchema: {
+        short_label: z.string().min(1).describe('Sample short_label.'),
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const { short_label } = args as { short_label: string };
+    async ({ short_label }) => {
       return guard(
         async () => {
           const ref = await client.findSampleByShortLabel(short_label);
@@ -748,31 +767,29 @@ export function registerReadTools(
   // Reactions
   // -----------------------------------------------------------------
 
-  server.tool(
+  server.registerTool(
     'chem_list_reactions',
-    'List reactions in a collection. Renders as one line per reaction with status, ' +
-      'role, and product count; use `chem_get_reaction` for the scheme + participant ' +
-      'tables.',
     {
-      collection_id: collectionIdSchema,
-      ...paginationArgsSchema,
-      from_date: z
-        .string()
-        .optional()
-        .describe('Created-on lower bound, ISO date (e.g. "2026-01-31").'),
-      to_date: z
-        .string()
-        .optional()
-        .describe('Created-on upper bound, ISO date (inclusive day).'),
+      title: 'List reactions',
+      description:
+        'List reactions in a collection. Renders as one line per reaction with status, ' +
+        'role, and product count; use `chem_get_reaction` for the scheme + participant ' +
+        'tables.',
+      inputSchema: {
+        collection_id: collectionIdSchema,
+        ...paginationArgsSchema,
+        from_date: z
+          .string()
+          .optional()
+          .describe('Created-on lower bound, ISO date (e.g. "2026-01-31").'),
+        to_date: z
+          .string()
+          .optional()
+          .describe('Created-on upper bound, ISO date (inclusive day).'),
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const input = args as {
-        collection_id: number | 'all';
-        page?: number;
-        per_page?: number;
-        from_date?: string;
-        to_date?: string;
-      };
+    async (input) => {
       return guard(
         () =>
           client.listReactions({
@@ -801,15 +818,19 @@ export function registerReadTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'chem_get_reaction',
-    'Fetch one reaction. Returns a scheme one-liner, per-role participant tables ' +
-      '(starting materials / reactants / products / solvents with equiv, amount, ' +
-      'yield), description, observation, purification, and the analyses tree. ' +
-      'All analyses hydrate in the same round-trip.',
-    { id: positiveInt.describe('Reaction id.') },
-    async (args) => {
-      const { id } = args as { id: number };
+    {
+      title: 'Get reaction',
+      description:
+        'Fetch one reaction. Returns a scheme one-liner, per-role participant tables ' +
+        '(starting materials / reactants / products / solvents with equiv, amount, ' +
+        'yield), description, observation, purification, and the analyses tree. ' +
+        'All analyses hydrate in the same round-trip.',
+      inputSchema: { id: positiveInt.describe('Reaction id.') },
+      annotations: READ,
+    },
+    async ({ id }) => {
       return guard(
         () => client.getReaction(id),
         (response) => text(formatReaction(response.reaction, formatOpts))
@@ -817,12 +838,16 @@ export function registerReadTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'chem_get_reaction_by_short_label',
-    'Resolve a reaction short label (e.g. "RXN-099") and return the full scheme view.',
-    { short_label: z.string().min(1) },
-    async (args) => {
-      const { short_label } = args as { short_label: string };
+    {
+      title: 'Get reaction by short label',
+      description:
+        'Resolve a reaction short label (e.g. "RXN-099") and return the full scheme view.',
+      inputSchema: { short_label: z.string().min(1) },
+      annotations: READ,
+    },
+    async ({ short_label }) => {
       return guard(
         async () => {
           const ref = await client.findReactionByShortLabel(short_label);
@@ -842,20 +867,20 @@ export function registerReadTools(
   // Research plans
   // -----------------------------------------------------------------
 
-  server.tool(
+  server.registerTool(
     'chem_list_research_plans',
-    'List research plans in a collection. One line per plan. Use ' +
-      '`chem_get_research_plan` for the body blocks.',
     {
-      collection_id: collectionIdSchema,
-      ...paginationArgsSchema,
+      title: 'List research plans',
+      description:
+        'List research plans in a collection. One line per plan. Use ' +
+        '`chem_get_research_plan` for the body blocks.',
+      inputSchema: {
+        collection_id: collectionIdSchema,
+        ...paginationArgsSchema,
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const input = args as {
-        collection_id: number | 'all';
-        page?: number;
-        per_page?: number;
-      };
+    async (input) => {
       return guard(
         () =>
           client.listResearchPlans({
@@ -887,19 +912,23 @@ export function registerReadTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'chem_get_research_plan',
-    'Fetch one research plan. Walks the typed `body` block array and renders: ' +
-      '`richtext`/`text` blocks as markdown (Quill delta → bold/italic/links/' +
-      'headers/lists/blockquote/code-block), `table` blocks as GFM pipe tables, ' +
-      'image/sample/reaction/ketcher refs as short placeholders. The rendered ' +
-      'output also includes a field inventory with stable block ids before the ' +
-      'body so callers can target `chem_*_research_plan_field` updates safely. ' +
-      'Unknown block kinds fall through as fenced JSON so content is never ' +
-      'silently dropped.',
-    { id: positiveInt.describe('Research plan id.') },
-    async (args) => {
-      const { id } = args as { id: number };
+    {
+      title: 'Get research plan',
+      description:
+        'Fetch one research plan. Walks the typed `body` block array and renders: ' +
+        '`richtext`/`text` blocks as markdown (Quill delta → bold/italic/links/' +
+        'headers/lists/blockquote/code-block), `table` blocks as GFM pipe tables, ' +
+        'image/sample/reaction/ketcher refs as short placeholders. The rendered ' +
+        'output also includes a field inventory with stable block ids before the ' +
+        'body so callers can target `chem_*_research_plan_field` updates safely. ' +
+        'Unknown block kinds fall through as fenced JSON so content is never ' +
+        'silently dropped.',
+      inputSchema: { id: positiveInt.describe('Research plan id.') },
+      annotations: READ,
+    },
+    async ({ id }) => {
       return guard(
         () => client.getResearchPlan(id),
         (response) =>
@@ -908,16 +937,20 @@ export function registerReadTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'chem_list_research_plan_fields',
-    'List the body fields inside one research plan with stable field ids, ' +
-      'block types, titles, and lightweight summaries (table sizes, linked ' +
-      'reaction/sample ids, Ketcher SVG presence). Use this before ' +
-      '`chem_add_research_plan_field`, `chem_update_research_plan_field`, or ' +
-      '`chem_delete_research_plan_field` when you want a compact target list.',
-    { id: positiveInt.describe('Research plan id.') },
-    async (args) => {
-      const { id } = args as { id: number };
+    {
+      title: 'List research plan fields',
+      description:
+        'List the body fields inside one research plan with stable field ids, ' +
+        'block types, titles, and lightweight summaries (table sizes, linked ' +
+        'reaction/sample ids, Ketcher SVG presence). Use this before ' +
+        '`chem_add_research_plan_field`, `chem_update_research_plan_field`, or ' +
+        '`chem_delete_research_plan_field` when you want a compact target list.',
+      inputSchema: { id: positiveInt.describe('Research plan id.') },
+      annotations: READ,
+    },
+    async ({ id }) => {
       return guard(
         () => client.getResearchPlan(id),
         (response) => {
@@ -937,19 +970,19 @@ export function registerReadTools(
   // Wellplates & screens
   // -----------------------------------------------------------------
 
-  server.tool(
+  server.registerTool(
     'chem_list_wellplates',
-    'List wellplates in a collection.',
     {
-      collection_id: collectionIdSchema,
-      ...paginationArgsSchema,
+      title: 'List wellplates',
+      description:
+        'List wellplates in a collection.',
+      inputSchema: {
+        collection_id: collectionIdSchema,
+        ...paginationArgsSchema,
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const input = args as {
-        collection_id: number | 'all';
-        page?: number;
-        per_page?: number;
-      };
+    async (input) => {
       return guard(
         () =>
           client.listWellplates({
@@ -978,13 +1011,17 @@ export function registerReadTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'chem_get_wellplate',
-    'Fetch one wellplate. Draws an ASCII grid for standard sizes (≤96 wells), ' +
-      'row-per-well list otherwise.',
-    { id: positiveInt.describe('Wellplate id.') },
-    async (args) => {
-      const { id } = args as { id: number };
+    {
+      title: 'Get wellplate',
+      description:
+        'Fetch one wellplate. Draws an ASCII grid for standard sizes (≤96 wells), ' +
+        'row-per-well list otherwise.',
+      inputSchema: { id: positiveInt.describe('Wellplate id.') },
+      annotations: READ,
+    },
+    async ({ id }) => {
       return guard(
         () => client.getWellplate(id),
         (response) => text(formatWellplate(response.wellplate, formatOpts))
@@ -992,19 +1029,19 @@ export function registerReadTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'chem_list_screens',
-    'List screens in a collection.',
     {
-      collection_id: collectionIdSchema,
-      ...paginationArgsSchema,
+      title: 'List screens',
+      description:
+        'List screens in a collection.',
+      inputSchema: {
+        collection_id: collectionIdSchema,
+        ...paginationArgsSchema,
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const input = args as {
-        collection_id: number | 'all';
-        page?: number;
-        per_page?: number;
-      };
+    async (input) => {
       return guard(
         () =>
           client.listScreens({
@@ -1026,13 +1063,17 @@ export function registerReadTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'chem_get_screen',
-    'Fetch one screen. Includes collaborator, requirements, conditions, result, ' +
-      'and attached wellplates.',
-    { id: positiveInt.describe('Screen id.') },
-    async (args) => {
-      const { id } = args as { id: number };
+    {
+      title: 'Get screen',
+      description:
+        'Fetch one screen. Includes collaborator, requirements, conditions, result, ' +
+        'and attached wellplates.',
+      inputSchema: { id: positiveInt.describe('Screen id.') },
+      annotations: READ,
+    },
+    async ({ id }) => {
       return guard(
         () => client.getScreen(id),
         (response) => text(formatScreen(response.screen, formatOpts))
@@ -1044,33 +1085,31 @@ export function registerReadTools(
   // Cross-kind free-text search
   // -----------------------------------------------------------------
 
-  server.tool(
+  server.registerTool(
     'chem_search',
-    'Cross-collection free-text search. Scope with `element_type` (default: all) ' +
-      'to restrict to samples / reactions / wellplates / screens. Chemotion’s ' +
-      'search is substring-based over name / short_label / description; for ' +
-      'substructure search use `chem_search_structure`, for structured filters ' +
-      'use `chem_search_advanced`. Text search only returns samples from ' +
-      'collections where you have sample detail level > 0.',
     {
-      query: z.string().min(1).describe('Substring to match against element names / labels / descriptions.'),
-      element_type: z
-        .enum(['all', 'samples', 'reactions', 'wellplates', 'screens'])
-        .optional()
-        .describe('Restrict by kind. Default `all`.'),
-      collection_id: collectionIdSchema
-        .optional()
-        .describe('Restrict to one collection. Default `all`.'),
-      ...paginationArgsSchema,
+      title: 'Search',
+      description:
+        'Cross-collection free-text search. Scope with `element_type` (default: all) ' +
+        'to restrict to samples / reactions / wellplates / screens. Chemotion’s ' +
+        'search is substring-based over name / short_label / description; for ' +
+        'substructure search use `chem_search_structure`, for structured filters ' +
+        'use `chem_search_advanced`. Text search only returns samples from ' +
+        'collections where you have sample detail level > 0.',
+      inputSchema: {
+        query: z.string().min(1).describe('Substring to match against element names / labels / descriptions.'),
+        element_type: z
+          .enum(['all', 'samples', 'reactions', 'wellplates', 'screens'])
+          .optional()
+          .describe('Restrict by kind. Default `all`.'),
+        collection_id: collectionIdSchema
+          .optional()
+          .describe('Restrict to one collection. Default `all`.'),
+        ...paginationArgsSchema,
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const input = args as {
-        query: string;
-        element_type?: 'all' | 'samples' | 'reactions' | 'wellplates' | 'screens';
-        collection_id?: number | 'all';
-        page?: number;
-        per_page?: number;
-      };
+    async (input) => {
       // Chemotion's search endpoints read `name_column` + `name` +
       // `search_by_method` inside `selection` but `collection_id` at
       // the top level of the body. We feed both correctly via the
@@ -1130,67 +1169,62 @@ export function registerReadTools(
   // Structure + advanced search (the elabftw-can't-do-this wins)
   // -----------------------------------------------------------------
 
-  server.tool(
+  server.registerTool(
     'chem_search_structure',
-    'Substructure / similarity search by chemical structure. Accepts either a ' +
-      'molfile (preferred) or a SMILES string — SMILES is auto-converted via ' +
-      '`/molecules/smiles` before dispatch. ' +
-      '`search_type=sub` finds every sample whose structure contains the query ' +
-      'as a substructure (fingerprint-filtered). `search_type=similar` finds ' +
-      'structurally-similar samples; `tanimoto_threshold` (0.0–1.0, default 0.7) ' +
-      'controls strictness. Scope with `collection_id` (default `all`).',
     {
-      molfile: z
-        .string()
-        .optional()
-        .describe(
-          'MDL molfile (V2000 or V3000). Preferred — no conversion step. ' +
-            'Mutually exclusive with `smiles`.'
-        ),
-      smiles: z
-        .string()
-        .optional()
-        .describe(
-          'SMILES string. Converted to molfile via `/molecules/smiles` before ' +
-            'dispatch. Mutually exclusive with `molfile`.'
-        ),
-      search_type: z
-        .preprocess(
-          (v) => (v === 'sim' ? 'similar' : v),
-          z.enum(['sub', 'similar'])
-        )
-        .describe(
-          '`sub` = substructure (exact substructure match, fingerprint-filtered). ' +
-            '`similar` = similarity (Tanimoto over Morgan-like fingerprints).'
-        ),
-      tanimoto_threshold: z
-        .number()
-        .min(0)
-        .max(1)
-        .optional()
-        .describe(
-          'Similarity threshold for `search_type=similar`. Default 0.7. Ignored for `sub`.'
-        ),
-      element_type: z
-        .enum(['samples', 'reactions'])
-        .optional()
-        .describe('Element kind to match against. Default `samples`.'),
-      collection_id: collectionIdSchema
-        .optional()
-        .describe('Restrict to one collection. Default `all`.'),
-      ...paginationArgsSchema,
+      title: 'Structure search',
+      description:
+        'Substructure / similarity search by chemical structure. Accepts either a ' +
+        'molfile (preferred) or a SMILES string — SMILES is auto-converted via ' +
+        '`/molecules/smiles` before dispatch. ' +
+        '`search_type=sub` finds every sample whose structure contains the query ' +
+        'as a substructure (fingerprint-filtered). `search_type=similar` finds ' +
+        'structurally-similar samples; `tanimoto_threshold` (0.0–1.0, default 0.7) ' +
+        'controls strictness. Scope with `collection_id` (default `all`).',
+      inputSchema: {
+        molfile: z
+          .string()
+          .optional()
+          .describe(
+            'MDL molfile (V2000 or V3000). Preferred — no conversion step. ' +
+              'Mutually exclusive with `smiles`.'
+          ),
+        smiles: z
+          .string()
+          .optional()
+          .describe(
+            'SMILES string. Converted to molfile via `/molecules/smiles` before ' +
+              'dispatch. Mutually exclusive with `molfile`.'
+          ),
+        search_type: z
+          .preprocess(
+            (v) => (v === 'sim' ? 'similar' : v),
+            z.enum(['sub', 'similar'])
+          )
+          .describe(
+            '`sub` = substructure (exact substructure match, fingerprint-filtered). ' +
+              '`similar` = similarity (Tanimoto over Morgan-like fingerprints).'
+          ),
+        tanimoto_threshold: z
+          .number()
+          .min(0)
+          .max(1)
+          .optional()
+          .describe(
+            'Similarity threshold for `search_type=similar`. Default 0.7. Ignored for `sub`.'
+          ),
+        element_type: z
+          .enum(['samples', 'reactions'])
+          .optional()
+          .describe('Element kind to match against. Default `samples`.'),
+        collection_id: collectionIdSchema
+          .optional()
+          .describe('Restrict to one collection. Default `all`.'),
+        ...paginationArgsSchema,
+      },
+      annotations: CATALOG,
     },
-    async (args) => {
-      const input = args as {
-        molfile?: string;
-        smiles?: string;
-        search_type: 'sub' | 'similar';
-        tanimoto_threshold?: number;
-        element_type?: 'samples' | 'reactions';
-        collection_id?: number | 'all';
-        page?: number;
-        per_page?: number;
-      };
+    async (input) => {
 
       if (!input.molfile && !input.smiles) {
         return errorText('either `molfile` or `smiles` must be provided.');
@@ -1274,92 +1308,79 @@ export function registerReadTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'chem_search_advanced',
-    'Advanced structured-filter search. Pass filter clauses as ' +
-      '`filters: Array<{link, match, column, value}>`. ' +
-      '`column` is a column on the element table from Chemotion\'s whitelist, e.g. ' +
-      'samples: `external_label` (always), `name`, `short_label`, `sum_formula`, ' +
-      '`molecular_mass`, `location`, `description`, `purity`, `density` ' +
-      '(need sample detail_level > 0 on the collection); reactions: `name`, ' +
-      '`short_label`, `status`, `rxno`, `duration`, `plain_text_description`; ' +
-      'wellplates / screens / research_plans: `name`. ' +
-      '`match` is a SQL op: `"LIKE"` / `"ILIKE"` for substring (Chemotion ' +
-      'wraps the value in `%…%` itself and escapes any `%` you send — **do ' +
-      'not** add wildcards), `"="`, `"<"`, `">"`, `">="`, `"<="` for exact / comparisons. ' +
-      '`link` chains clauses with `"AND"` / `"OR"` (empty string on the ' +
-      'first clause). ' +
-      'Example: `[{link:"", match:"LIKE", column:"external_label", value:"DMSN"}]`. ' +
-      'The tool assembles Chemotion\'s `{table, field:{table,column,label}}` ' +
-      'wrapper from your `column` + `element_type` — the column whitelist ' +
-      'is gated by the collection\'s `detail_level`.',
     {
-      filters: z
-        .array(
-          z.object({
-            link: z
-              .enum(['', 'AND', 'OR'])
-              .default('')
-              .describe(
-                'SQL linker to the previous clause. Empty string on the ' +
-                  'first clause, "AND" / "OR" thereafter.'
-              ),
-            match: z
-              .enum(['=', 'LIKE', 'ILIKE', 'NOT LIKE', 'NOT ILIKE', '>', '<', '>=', '<='])
-              .default('LIKE')
-              .describe('SQL operator.'),
-            column: z
-              .string()
-              .min(1)
-              .describe(
-                'Column name on the element table (e.g. "external_label", ' +
-                  '"name", "short_label", "molecular_mass").'
-              ),
-            value: z
-              .string()
-              .describe(
-                'Value to match. For LIKE/ILIKE pass the bare substring ' +
-                  '(`"DMSN"`); Chemotion adds the wildcards.'
-              ),
-            label: z
-              .string()
-              .optional()
-              .describe(
-                'Human-readable label for UI echo. Ignored by the server; ' +
-                  'defaults to the `column` name if omitted.'
-              ),
-          })
-        )
-        .min(1)
-        .describe('Filter clauses.'),
-      element_type: z
-        .enum(['samples', 'reactions', 'wellplates', 'screens', 'research_plans'])
-        .optional()
-        .describe('Element kind (table name). Default `samples`.'),
-      collection_id: collectionIdSchema
-        .optional()
-        .describe('Restrict to one collection. Default `all`.'),
-      ...paginationArgsSchema,
+      title: 'Advanced search',
+      description:
+        'Advanced structured-filter search. Pass filter clauses as ' +
+        '`filters: Array<{link, match, column, value}>`. ' +
+        '`column` is a column on the element table from Chemotion\'s whitelist, e.g. ' +
+        'samples: `external_label` (always), `name`, `short_label`, `sum_formula`, ' +
+        '`molecular_mass`, `location`, `description`, `purity`, `density` ' +
+        '(need sample detail_level > 0 on the collection); reactions: `name`, ' +
+        '`short_label`, `status`, `rxno`, `duration`, `plain_text_description`; ' +
+        'wellplates / screens / research_plans: `name`. ' +
+        '`match` is a SQL op: `"LIKE"` / `"ILIKE"` for substring (Chemotion ' +
+        'wraps the value in `%…%` itself and escapes any `%` you send — **do ' +
+        'not** add wildcards), `"="`, `"<"`, `">"`, `">="`, `"<="` for exact / comparisons. ' +
+        '`link` chains clauses with `"AND"` / `"OR"` (empty string on the ' +
+        'first clause). ' +
+        'Example: `[{link:"", match:"LIKE", column:"external_label", value:"DMSN"}]`. ' +
+        'The tool assembles Chemotion\'s `{table, field:{table,column,label}}` ' +
+        'wrapper from your `column` + `element_type` — the column whitelist ' +
+        'is gated by the collection\'s `detail_level`.',
+      inputSchema: {
+        filters: z
+          .array(
+            z.object({
+              link: z
+                .enum(['', 'AND', 'OR'])
+                .default('')
+                .describe(
+                  'SQL linker to the previous clause. Empty string on the ' +
+                    'first clause, "AND" / "OR" thereafter.'
+                ),
+              match: z
+                .enum(['=', 'LIKE', 'ILIKE', 'NOT LIKE', 'NOT ILIKE', '>', '<', '>=', '<='])
+                .default('LIKE')
+                .describe('SQL operator.'),
+              column: z
+                .string()
+                .min(1)
+                .describe(
+                  'Column name on the element table (e.g. "external_label", ' +
+                    '"name", "short_label", "molecular_mass").'
+                ),
+              value: z
+                .string()
+                .describe(
+                  'Value to match. For LIKE/ILIKE pass the bare substring ' +
+                    '(`"DMSN"`); Chemotion adds the wildcards.'
+                ),
+              label: z
+                .string()
+                .optional()
+                .describe(
+                  'Human-readable label for UI echo. Ignored by the server; ' +
+                    'defaults to the `column` name if omitted.'
+                ),
+            })
+          )
+          .min(1)
+          .describe('Filter clauses.'),
+        element_type: z
+          .enum(['samples', 'reactions', 'wellplates', 'screens', 'research_plans'])
+          .optional()
+          .describe('Element kind (table name). Default `samples`.'),
+        collection_id: collectionIdSchema
+          .optional()
+          .describe('Restrict to one collection. Default `all`.'),
+        ...paginationArgsSchema,
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const input = args as {
-        filters: Array<{
-          link?: string;
-          match?: string;
-          column: string;
-          value: string;
-          label?: string;
-        }>;
-        element_type?:
-          | 'samples'
-          | 'reactions'
-          | 'wellplates'
-          | 'screens'
-          | 'research_plans';
-        collection_id?: number | 'all';
-        page?: number;
-        per_page?: number;
-      };
+    async (input) => {
       const table = input.element_type ?? 'samples';
       // Chemotion's advanced-search filter needs `table` at BOTH the
       // filter level and inside `field`; missing either makes the
@@ -1434,28 +1455,28 @@ export function registerReadTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'chem_search_by_ids',
-    'Fetch element summaries for a specific list of ids. Use when the caller ' +
-      'already knows ids (e.g. from a previous search result or cross-reference). ' +
-      'Chemotion expects the singular-form element kind on this endpoint.',
     {
-      ids: z
-        .array(positiveInt)
-        .min(1)
-        .max(100)
-        .describe('Element ids, same kind. Max 100.'),
-      kind: elementKindSchema,
-      collection_id: collectionIdSchema
-        .optional()
-        .describe('Optional collection scope. Default `all`.'),
+      title: 'Search by ids',
+      description:
+        'Fetch element summaries for a specific list of ids. Use when the caller ' +
+        'already knows ids (e.g. from a previous search result or cross-reference). ' +
+        'Chemotion expects the singular-form element kind on this endpoint.',
+      inputSchema: {
+        ids: z
+          .array(positiveInt)
+          .min(1)
+          .max(100)
+          .describe('Element ids, same kind. Max 100.'),
+        kind: elementKindSchema,
+        collection_id: collectionIdSchema
+          .optional()
+          .describe('Optional collection scope. Default `all`.'),
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const input = args as {
-        ids: number[];
-        kind: ChemotionElementType;
-        collection_id?: number | 'all';
-      };
+    async (input) => {
       return guard(
         () =>
           client.searchByIds(input.ids, input.kind, {
@@ -1493,17 +1514,21 @@ export function registerReadTools(
   // Utilities
   // -----------------------------------------------------------------
 
-  server.tool(
+  server.registerTool(
     'chem_smiles_to_molfile',
-    'Convert a SMILES string to a molfile via Chemotion’s OpenBabel/RDKit ' +
-      'pipeline. Use as a preprocessing step before `chem_search_structure` (which ' +
-      'only accepts molfile) or before `chem_create_sample` when the caller has a ' +
-      'SMILES but the server prefers molfile.',
     {
-      smiles: z.string().min(1).describe('Canonical or non-canonical SMILES.'),
+      title: 'SMILES to molfile',
+      description:
+        'Convert a SMILES string to a molfile via Chemotion’s OpenBabel/RDKit ' +
+        'pipeline. Use as a preprocessing step before `chem_search_structure` (which ' +
+        'only accepts molfile) or before `chem_create_sample` when the caller has a ' +
+        'SMILES but the server prefers molfile.',
+      inputSchema: {
+        smiles: z.string().min(1).describe('Canonical or non-canonical SMILES.'),
+      },
+      annotations: CATALOG,
     },
-    async (args) => {
-      const { smiles } = args as { smiles: string };
+    async ({ smiles }) => {
       return guard(
         () => client.smilesToMolfile(smiles),
         (response) => {
@@ -1526,23 +1551,27 @@ export function registerReadTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'chem_download_attachment',
-    'Download an attachment by id. Text files are returned inline; binary ' +
-      'attachments come back as base64 with MIME type + size. Files over ' +
-      '`max_bytes` are truncated with a note.',
     {
-      id: positiveInt.describe('Attachment id.'),
-      max_bytes: z
-        .number()
-        .int()
-        .positive()
-        .max(10_000_000)
-        .optional()
-        .describe('Cap on returned bytes. Default 2_000_000 (2 MB).'),
+      title: 'Download attachment',
+      description:
+        'Download an attachment by id. Text files are returned inline; binary ' +
+        'attachments come back as base64 with MIME type + size. Files over ' +
+        '`max_bytes` are truncated with a note.',
+      inputSchema: {
+        id: positiveInt.describe('Attachment id.'),
+        max_bytes: z
+          .number()
+          .int()
+          .positive()
+          .max(10_000_000)
+          .optional()
+          .describe('Cap on returned bytes. Default 2_000_000 (2 MB).'),
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const input = args as { id: number; max_bytes?: number };
+    async (input) => {
       const MAX = input.max_bytes ?? 2_000_000;
       return guard(
         async () => {
@@ -1581,20 +1610,24 @@ export function registerReadTools(
   // but isn't sure of the kind (e.g. from search results).
   // -----------------------------------------------------------------
 
-  server.tool(
+  server.registerTool(
     'chem_get_update_payload',
-    'Fetch the raw field set needed for a safe Chemotion PUT. Returns a ' +
-      'JSON starter payload for the matching `chem_update_*` tool, including ' +
-      'hidden required fields such as `container`, `materials`, `body`, ' +
-      '`wells`, `wellplate_ids`, and `research_plan_ids` when applicable. ' +
-      'Use this when you want to inspect or edit an existing entity without ' +
-      'dropping server-managed attachments/links by accident.',
     {
-      kind: elementKindSchema,
-      id: positiveInt.describe('Element id.'),
+      title: 'Get update payload',
+      description:
+        'Fetch the raw field set needed for a safe Chemotion PUT. Returns a ' +
+        'JSON starter payload for the matching `chem_update_*` tool, including ' +
+        'hidden required fields such as `container`, `materials`, `body`, ' +
+        '`wells`, `wellplate_ids`, and `research_plan_ids` when applicable. ' +
+        'Use this when you want to inspect or edit an existing entity without ' +
+        'dropping server-managed attachments/links by accident.',
+      inputSchema: {
+        kind: elementKindSchema,
+        id: positiveInt.describe('Element id.'),
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const { kind, id } = args as { kind: ChemotionElementType; id: number };
+    async ({ kind, id }) => {
       return guard(
         () => fetchEntity(client, kind, id),
         (entity) => text(renderUpdatePrep(kind, buildUpdatePrep(kind, entity)))
@@ -1602,17 +1635,21 @@ export function registerReadTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'chem_get',
-    'Cross-kind fetch: pass an element kind + id and get the appropriate ' +
-      'chemistry-aware render. Thin alias over the per-kind `chem_get_*` tools; ' +
-      'useful when the model has an id from a search result and wants one tool call.',
     {
-      kind: elementKindSchema,
-      id: positiveInt.describe('Element id.'),
+      title: 'Get element',
+      description:
+        'Cross-kind fetch: pass an element kind + id and get the appropriate ' +
+        'chemistry-aware render. Thin alias over the per-kind `chem_get_*` tools; ' +
+        'useful when the model has an id from a search result and wants one tool call.',
+      inputSchema: {
+        kind: elementKindSchema,
+        id: positiveInt.describe('Element id.'),
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const { kind, id } = args as { kind: ChemotionElementType; id: number };
+    async ({ kind, id }) => {
       return guard(
         () => fetchEntity(client, kind, id),
         (entity) => text(formatEntity(kind, entity, formatOpts))
@@ -1624,28 +1661,29 @@ export function registerReadTools(
   // Bulk fetch — elabftw cohort-retro lesson: one call, N entities
   // -----------------------------------------------------------------
 
-  server.tool(
+  server.registerTool(
     'chem_get_bulk',
-    'Fetch up to 50 elements of the same kind in one tool call, with shared ' +
-      'chemistry-aware rendering. Requests are chunked into groups of 8 to avoid ' +
-      'opening 50 sockets at once; any id that fails aborts the whole call with ' +
-      'the offending id surfaced in the error. ' +
-      'Use this for cohort-style review (e.g. "walk me through the last 25 ' +
-      'reactions in collection X with their analyses") instead of issuing 25 ' +
-      'separate `chem_get_reaction` tool calls.',
     {
-      kind: elementKindSchema,
-      ids: z
-        .array(positiveInt)
-        .min(1)
-        .max(50)
-        .describe('Element ids, same `kind` for all. Max 50.'),
+      title: 'Get elements in bulk',
+      description:
+        'Fetch up to 50 elements of the same kind in one tool call, with shared ' +
+        'chemistry-aware rendering. Requests are chunked into groups of 8 to avoid ' +
+        'opening 50 sockets at once; any id that fails aborts the whole call with ' +
+        'the offending id surfaced in the error. ' +
+        'Use this for cohort-style review (e.g. "walk me through the last 25 ' +
+        'reactions in collection X with their analyses") instead of issuing 25 ' +
+        'separate `chem_get_reaction` tool calls.',
+      inputSchema: {
+        kind: elementKindSchema,
+        ids: z
+          .array(positiveInt)
+          .min(1)
+          .max(50)
+          .describe('Element ids, same `kind` for all. Max 50.'),
+      },
+      annotations: READ,
     },
-    async (args) => {
-      const { kind, ids } = args as {
-        kind: ChemotionElementType;
-        ids: number[];
-      };
+    async ({ kind, ids }) => {
       return guard(
         async () => {
           const factories = ids.map((id) => async () => {
@@ -1669,8 +1707,4 @@ export function registerReadTools(
       );
     }
   );
-
-  // Silence "unused" warning — we may surface it in a future phase.
-  void ELEMENT_TYPE_PLURAL;
-  void formatContainerTree;
 }

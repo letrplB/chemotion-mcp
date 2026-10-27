@@ -564,7 +564,6 @@ function renderQuillDelta(delta: unknown): string {
 
   let out = '';
   let buf = '';
-  let pendingList: 'bullet' | 'ordered' | null = null;
 
   const flushLine = (attrs: Record<string, unknown> | undefined) => {
     const header = attrs?.header;
@@ -576,13 +575,10 @@ function renderQuillDelta(delta: unknown): string {
       out += '```\n' + buf + '\n```\n';
     } else if (attrs?.list === 'bullet') {
       out += '- ' + buf + '\n';
-      pendingList = 'bullet';
     } else if (attrs?.list === 'ordered') {
       out += '1. ' + buf + '\n';
-      pendingList = 'ordered';
     } else {
       out += buf + '\n';
-      pendingList = null;
     }
     buf = '';
   };

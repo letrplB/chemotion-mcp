@@ -22,6 +22,12 @@ Review against the Chemotion ELN source (v1.10 – v4.0.0).
 - `CHEMOTION_API_TOKEN` auth mode for Chemotion v4 personal API tokens. Works for SSO accounts.
 - Update tools no longer require `container`, reaction `materials`, or screen id arrays. Omitted values are kept as they are on the server.
 - Offline test suite (`npm test`).
+- Tool annotations and titles. Reads are marked read-only. Creates are additive. Updates and deletes are marked destructive. `chem_smiles_to_molfile` and SMILES structure search are additive, because Chemotion registers new molecules (and queries PubChem) on conversion.
+
+### Changed
+
+- Tools are registered with `registerTool` instead of the deprecated `server.tool`. Handler arguments are now typed from the input schemas, without casts.
+- `noUnusedLocals` / `noUnusedParameters` enabled; dead code removed.
 
 ## 0.1.0
 

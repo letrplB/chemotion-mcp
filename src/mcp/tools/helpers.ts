@@ -10,6 +10,7 @@
  * conversation alive and lets the model self-correct.
  */
 
+import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { ChemotionApiError, ChemotionAuthError } from '../../client/index.js';
 
@@ -71,6 +72,56 @@ export function writeDisabledResponse(): TextResponse {
       'delete.'
   );
 }
+
+// ---------------------------------------------------------------------
+// Tool annotations
+// ---------------------------------------------------------------------
+//
+// Hints clients use to decide what to auto-approve and what to confirm.
+// Chemotion is a closed system, so `openWorldHint` is false except where
+// a call reaches out to PubChem.
+
+/** Reads only. */
+export const READ: ToolAnnotations = {
+  readOnlyHint: true,
+  openWorldHint: false,
+};
+
+/**
+ * `POST /molecules/smiles`: registers the molecule in Chemotion's shared
+ * catalogue (and queues a PubChem lookup) if it is new. Additive and
+ * idempotent, but not read-only.
+ */
+export const CATALOG: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+};
+
+/** Adds a new element, field, or participant. */
+export const CREATE: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+};
+
+/** Overwrites fields of an existing element. */
+export const UPDATE: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+/** Deletes; not restorable through the API or UI. */
+export const DELETE: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: false,
+};
 
 // ---------------------------------------------------------------------
 // Shared zod primitives
