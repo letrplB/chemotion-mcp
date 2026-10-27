@@ -35,18 +35,20 @@ on some HTTP clients.
 
 ## Collections
 
-### `GET /collections` returns 405
+### The collection routes changed in v4
 
-There is no single aggregate endpoint. The four real routes are
-`/collections/roots`, `/collections/shared_roots`,
-`/collections/remote_roots`, `/collections/locked`. Merge
-client-side.
+Before v4, `GET /collections` returns 405 and the tree is split
+across `/collections/roots`, `/shared_roots`, `/remote_roots`, and
+`/locked`. v4 removed all four and serves `GET /collections` →
+`{own, shared_with_me}` as flat rows linked by `ancestry`. The client
+tries v4 first. See [`collections.md`](./collections.md).
 
 ### `collection_id=all` is not a valid API value
 
 The string `"all"` is UI-only. The API always wants a numeric id.
-The "All" pseudo-collection id is **per-user** and lives in
-`/collections/locked`. Resolve it client-side and cache per session.
+The "All" pseudo-collection id is **per-user**: it is the locked row
+labelled `All` in the collection list. Resolve it client-side and
+cache per session.
 
 ### The "All" id is not stable across users
 
@@ -138,14 +140,18 @@ as part of the reaction (typical for solvents and single-use
 reactants). This is intentional Chemotion behaviour, not a bug,
 but it's surprising enough to bite any caller who didn't know.
 
-### `PUT /wellplates/:id` crashes when `wells` is omitted
+### `PUT /wellplates/:id` — `wells` is a full replacement that destroys samples
 
-Chemotion's wellplate Update usecase NPEs on nil `wells` even though
-the Grape contract marks it optional (see
-[`upstream-bugs.md`](./upstream-bugs.md)). Always send
-`"wells": []` on update unless you're actually changing the well
-layout. Our client injects the default automatically via
-`updateWellplate()`.
+`WellplateUpdater#update_wells` updates the wells you send, then runs
+`Sample.where(id: current_sample_ids - included_sample_ids).destroy_all`.
+Every sample that sat in the plate but is missing from `wells` is
+**deleted**. `"wells": []` therefore deletes all of the plate's samples.
+Omitting `wells` crashes older builds on nil (see
+[`upstream-bugs.md`](./upstream-bugs.md)).
+
+The client's `updateWellplate()` sends the current wells back (from a
+GET) when the caller omits them. An earlier version defaulted to
+`"wells": []`, which turned every rename into a mass delete.
 
 ### Wellplate `description` and Screen `description` are Quill deltas too
 
@@ -171,16 +177,15 @@ block wrapper is a plain object.
 
 ### `container` is required on POST AND PUT
 
-Grape's `requires :container, type: Hash` fires on both paths. For
-POST, pass `EMPTY_ROOT_CONTAINER` if you don't care about analyses.
-For PUT, **fetch the current container first and pass it back
-untouched** — forgetting it will either 400 or, worse, nuke the
-analyses tree.
+Grape's `requires :container, type: Hash` fires on both paths, so
+omitting it is a 400. It does not wipe analyses:
+`Usecases::Containers::UpdateDatamodel` merges by id and only removes
+children flagged `is_deleted: true`. An empty root container is a
+no-op, and passing the fetched tree back is what the UI does.
 
-The MCP now exposes `chem_get_update_payload` to make this round-trip
-explicit. Use it before any `chem_update_*` call that requires hidden
-state such as `container`, `materials`, `body`, `wells`, or linked-id
-arrays.
+The client's update methods send the current container back when the
+caller omits it. They do the same for `materials` (reactions),
+`wells` (wellplates), and the screen id arrays.
 
 ### Sample `purity` is decimal, not percent
 
@@ -193,13 +198,30 @@ Use `DELETE /ui_state/` with a ui-state payload scoped to
 `currentCollection.id: 0` (the `get_all_collection_for_user` sentinel).
 Already wrapped in `deleteResearchPlanByUiState`.
 
-### Reactions need `materials` on POST AND PUT
+### Reactions need `materials` on POST AND PUT, and it replaces everything
 
-Same pattern as `container`: fetch current materials on update,
-pass back. Sample refs inside materials are shaped `{id, reference,
-equivalent, position, real_amount_*, target_amount_*, ...}` on modern
-Chemotion readback. If you omit the amount fields when sending a later
-PUT, Chemotion may effectively reset those participant rows.
+`Usecases::Reactions::UpdateMaterials` treats `materials` as the full
+participant list:
+
+- Participants missing from every bucket are destroyed
+  (`destroy_unused_samples`). On v4 this includes
+  `reactant_sbmm_samples`.
+- For each existing participant, `update_existing_sample` writes
+  `target_/real_amount_*`, `metrics`, `dry_solvent`, and `solvent`
+  straight from the payload. `associate_sample_with_reaction` does the
+  same for `equivalent`, `reference`, `show_label`, `waste`,
+  `coefficient`, `position`, `gas_type`, `gas_phase_data`,
+  `conversion_rate`, and `weight_percentage*`. A field you leave out is
+  saved as nil.
+- A polymer sample sent without `residues` raises
+  `NoMethodError` → 500.
+
+Safe pattern: send back the participant rows exactly as
+`GET /reactions/:id` returned them, then add or modify rows. The
+client's `cloneReactionMaterials()` does this, and `updateReaction()`
+uses it when `materials` is omitted. The first version of our attach
+tools rebuilt rows from a field whitelist and silently cleared
+solvents and metrics on every existing participant.
 
 ### Bare `sample_id` in reaction materials silently MOVES the join row
 
@@ -288,6 +310,19 @@ If you write a Ketcher block with `sdf_file` but no persisted
 `svg_file`, the structure data is there, but the UI cannot render the
 preview image yet.
 
+## Search
+
+### Similarity search wants `search_type: "similar"`
+
+Grape validates `selection.search_type` against `%w[similar sub]`.
+`"sim"` is a 400.
+
+### List date filters are Unix seconds
+
+`from_date` / `to_date` on `GET /samples` and the other list routes
+are `Integer` Unix seconds (`Time.zone.at`). They filter `updated_at`
+unless `filter_created_at=true`.
+
 ## MCP transport
 
 ### zod unions with string literals corrupt integer args
@@ -326,4 +361,4 @@ example — copy that shape for any new union-with-literal schema.
 
 Most of this lives as executable-code comments in `src/client/`. When
 a gotcha turns into a breaking change, update both this doc and
-`dev-docs/test-and-fix-log.md`.
+the local reverse-engineering log (`dev-docs/`, not published).

@@ -13,7 +13,7 @@ probe date — re-verify before filing a ticket.
 
 ## `POST /api/v1/samples` NoMethodError when `xref` is omitted
 
-**Discovered:** 2026-04-24 on a live Chemotion 1.x deployment,
+**Discovered:** 2026-04-24 on a live pre-v4 Chemotion deployment,
 probed against `ComPlat/chemotion_ELN@main`.
 
 **Symptom:** `POST /api/v1/samples` returns **500 Internal Server
@@ -75,7 +75,7 @@ Hash, default: {}`).
 
 ## `POST /api/v1/search/by_ids` 500 when `total_elements` is omitted
 
-**Discovered:** 2026-04-24 on a live Chemotion 1.x deployment.
+**Discovered:** 2026-04-24 on a live pre-v4 Chemotion deployment.
 
 **Symptom:** `POST /api/v1/search/by_ids` returns **500 Internal
 Server Error** with a Rails 5xx HTML page when the caller sends an
@@ -115,7 +115,7 @@ to `ids.length` when the caller omits it.
 
 ## `PUT /api/v1/wellplates/:id` NPE when `wells` is omitted
 
-**Discovered:** 2026-04-24 on a live Chemotion 1.x deployment.
+**Discovered:** 2026-04-24 on a live pre-v4 Chemotion deployment.
 
 **Symptom:** `PUT /api/v1/wellplates/:id` → **500 Internal Server
 Error** with a Rails 5xx HTML page when the caller sends a body
@@ -138,19 +138,26 @@ NoMethodErrors out to 500.
 500. Add `"wells": []` → 200 with the updated wellplate envelope.
 
 **Client-side workaround:**
-`src/client/client.ts` — `updateWellplate()` defaults `wells: []` when
-the caller didn't provide one. Empty array is a no-op in the wells
-updater path.
+`src/client/client.ts` — `updateWellplate()` fetches the wellplate and
+sends its current `wells` back when the caller didn't provide any.
 
-**Suggested fix (upstream):** either mirror the contract by guarding
-`update_wells` against nil/empty inputs, or tighten the Grape
-contract to `requires :wells, type: Array, default: []`.
+**Do not send `wells: []` instead.** An earlier version of this client
+did. It avoids the crash, but `update_wells` then destroys every
+sample that was in the plate, because it deletes samples missing from
+the payload. See the gotcha in [`gotchas.md`](./gotchas.md).
+
+**Suggested fix (upstream):** skip `update_wells` entirely when
+`params[:wells]` is nil. Do NOT default it to `[]`: an empty array
+destroys the plate's samples.
+
+**Status in v4.0.0:** `Usecases::Wellplates::Update` still passes
+`params[:wells]` through unguarded.
 
 ---
 
 ## Advanced search `field.table` / `filter.table` double-lookup
 
-**Discovered:** 2026-04-24 on a live Chemotion 1.x deployment.
+**Discovered:** 2026-04-24 on a live pre-v4 Chemotion deployment.
 
 **Symptom:** `POST /api/v1/search/advanced` returns a per-bucket
 `"error":"Your search for <column> is not allowed"` for every column,
@@ -202,7 +209,7 @@ guaranteeing both lookup paths are populated.
 
 ## `POST /users/sign_in` form route 406 on JSON Accept
 
-**Discovered:** 2026-04-24 on a live Chemotion 1.x deployment.
+**Discovered:** 2026-04-24 on a live pre-v4 Chemotion deployment.
 
 **Symptom:** `POST /users/sign_in` with `Accept: application/json`
 returns **406 Not Acceptable** even though the endpoint clearly
@@ -230,7 +237,7 @@ only the HTML form is supported on the Grape-era API.
 
 ## Advanced search LIKE/ILIKE silently wildcards values
 
-**Discovered:** 2026-04-24 on a live Chemotion 1.x deployment.
+**Discovered:** 2026-04-24 on a live pre-v4 Chemotion deployment.
 
 **Symptom:** `POST /search/advanced` with
 `match: "LIKE"`, `value: "%DMSN%"` matches zero rows even though

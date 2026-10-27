@@ -18,11 +18,10 @@
 // ---------------------------------------------------------------------
 
 /**
- * Chemotion list endpoints paginate via `page` / `per_page` (Kaminari),
- * and most return a single top-level key matching the resource name
- * plus a `pagination` envelope. Example:
- *   GET /api/v1/samples?collection_id=1 →
- *     { samples: [...], molecules: [...], pagination: { page, per_page, total_count } }
+ * Chemotion list endpoints paginate via `page` / `per_page`
+ * (grape-kaminari) and report totals in `X-Total` / `X-Total-Pages` /
+ * `X-Page` / `X-Per-Page` headers. The client copies those into a
+ * `pagination` object on the parsed body.
  */
 export interface Pagination {
   page?: number;
@@ -71,12 +70,11 @@ export interface Collection {
 }
 
 /**
- * Aggregated shape returned by `ChemotionClient.listCollections()`.
- * Chemotion has no single `/collections` endpoint — the client
- * merges `/collections/roots` (own), `/collections/shared_roots`,
- * `/collections/remote_roots`, and `/collections/locked` (the
- * synthetic "All" + repository pseudo-collections) and exposes both
- * the merged `collections` array and the per-bank breakdown.
+ * Aggregated shape returned by `ChemotionClient.listCollections()`:
+ * the merged `collections` array plus a per-origin breakdown. On v4
+ * the rows come from `GET /collections` (flat, linked by `ancestry`);
+ * on older releases from `/collections/roots`, `/shared_roots`,
+ * `/remote_roots`, and `/locked` (nested via `children`).
  */
 export interface CollectionsListResponse {
   collections?: Collection[];
@@ -587,7 +585,8 @@ export interface SearchRequest {
  */
 export interface StructureSearchRequest {
   selection: SearchSelection & {
-    search_type: 'sub' | 'sim';
+    /** The API accepts exactly `sub` or `similar`. */
+    search_type: 'sub' | 'similar';
     molfile: string;
     /** 0.0 – 1.0 for similarity; ignored for substructure. */
     tanimoto_threshold?: number;
@@ -702,8 +701,8 @@ export interface SampleCreateBody {
   [key: string]: unknown;
 }
 
+/** `container` omitted → the client sends the current one back. */
 export type SampleUpdateBody = Partial<SampleCreateBody> & {
-  container: ContainerPayload;
   [key: string]: unknown;
 };
 
@@ -742,9 +741,8 @@ export interface ReactionCreateBody {
   [key: string]: unknown;
 }
 
+/** `materials` / `container` omitted → the client sends the current ones back. */
 export type ReactionUpdateBody = Partial<ReactionCreateBody> & {
-  materials: ReactionMaterials;
-  container: ContainerPayload;
   [key: string]: unknown;
 };
 
@@ -776,8 +774,11 @@ export interface WellplateCreateBody {
   [key: string]: unknown;
 }
 
+/**
+ * `wells` replaces the whole layout (samples in omitted wells are
+ * destroyed); omit it — and `container` — to keep the current state.
+ */
 export type WellplateUpdateBody = Partial<WellplateCreateBody> & {
-  container: ContainerPayload;
   [key: string]: unknown;
 };
 
@@ -804,14 +805,12 @@ export interface ScreenCreateBody {
   [key: string]: unknown;
 }
 
+/** Omitted id arrays / `container` → the client sends the current ones back. */
 export type ScreenUpdateBody = Partial<ScreenCreateBody> & {
-  wellplate_ids: number[];
-  research_plan_ids: number[];
-  container: ContainerPayload;
   [key: string]: unknown;
 };
 
+/** `container` omitted → the client sends the current one back. */
 export type ResearchPlanUpdateBody = Partial<ResearchPlanCreateBody> & {
-  container: ContainerPayload;
   [key: string]: unknown;
 };

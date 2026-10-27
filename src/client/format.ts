@@ -83,8 +83,16 @@ function nz(value: unknown): string | null {
   return String(value);
 }
 
+/** Round to `digits` decimals; `null` for missing or non-numeric input. */
+function fixed(value: unknown, digits: number): string | null {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? String(Number(n.toFixed(digits))) : null;
+}
+
 function pct(value: number | null | undefined): string | null {
-  if (value === null || value === undefined) return null;
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return null;
+  value = Number(value);
   // Chemotion stores purity as 0..1 and yield sometimes 0..1, sometimes
   // 0..100. Normalise to percent display by inspecting the range.
   const n = value <= 1 ? value * 100 : value;
@@ -149,14 +157,11 @@ function renderChemBlock(sample: Sample): string[] {
   if (c.inchi) lines.push(`- InChI: \`${c.inchi}\``);
   if (c.inchikey) lines.push(`- InChIKey: \`${c.inchikey}\``);
   if (c.sum_formula) lines.push(`- Molecular formula: **${c.sum_formula}**`);
-  if (c.molecular_weight != null)
-    lines.push(
-      `- Molecular weight: ${Number(c.molecular_weight.toFixed(3))} g/mol${
-        c.exact_molecular_weight != null
-          ? ` (exact ${Number(c.exact_molecular_weight.toFixed(4))})`
-          : ''
-      }`
-    );
+  const mw = fixed(c.molecular_weight, 3);
+  if (mw) {
+    const exact = fixed(c.exact_molecular_weight, 4);
+    lines.push(`- Molecular weight: ${mw} g/mol${exact ? ` (exact ${exact})` : ''}`);
+  }
   if (c.iupac_name) lines.push(`- IUPAC: ${c.iupac_name}`);
   return lines;
 }
@@ -468,8 +473,7 @@ function renderReactionTable(
   for (const r of rows) {
     const label = nz(r.short_label) ?? nz(r.name) ?? `#${r.id}`;
     const formula = nz(r.molecule?.sum_formula ?? r.molecular_formula) ?? '';
-    const mw = r.molecule?.molecular_weight ?? r.molecular_weight;
-    const mwStr = mw != null ? Number(mw.toFixed(2)).toString() : '';
+    const mwStr = fixed(r.molecule?.molecular_weight ?? r.molecular_weight, 2) ?? '';
     const equiv = r.equivalent != null ? r.equivalent.toString() : '';
     const amount =
       qty(r.real_amount_value, r.real_amount_unit) ??

@@ -7,19 +7,12 @@
  * (contrast with elabftw). Tool descriptions spell this out so the
  * LLM surfaces the stakes to the user before invoking.
  *
- * For create / update tools, the Grape contract requires the
- * `container` Hash on sample / reaction / research_plan — Chemotion
- * uses it to thread the analyses tree through. Callers who are not
- * editing analyses can pass `EMPTY_ROOT_CONTAINER`; for updates, the
- * caller should fetch the entity first and pass its existing
- * `container` back untouched. We surface this as an explicit tool
- * arg rather than magicking a default, because:
- *   1. update without the existing container nukes the tree, and
- *   2. the LLM can see the shape it is shipping.
- *
- * Reaction materials follow the same pattern: the Grape contract
- * requires `materials` on both POST and PUT; the caller ships
- * arrays of sample refs keyed by role.
+ * The Grape contract requires hidden state on every PUT: `container`
+ * everywhere, `materials` on reactions, the id arrays on screens, and
+ * (in practice) `wells` on wellplates. Update tools make these
+ * optional and the client fills omitted ones from the entity's current
+ * state, so a plain "rename this" call cannot drop participants,
+ * wells, or links. Callers only send them to change them.
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -28,10 +21,8 @@ import { z } from 'zod';
 import {
   type ChemotionClient,
   type ContainerPayload,
-  type Reaction,
   type ReactionMaterialEntry,
   type ReactionMaterials,
-  type ReactionSampleRef,
   type ResearchPlanBlock,
   type ResearchPlanFieldType,
   type ResearchPlanKetcherValue,
@@ -39,6 +30,7 @@ import {
   type ResearchPlanTableValue,
   type ResearchPlanUpdateBody,
   EMPTY_ROOT_CONTAINER,
+  cloneReactionMaterials,
 } from '../../client/index.js';
 import type { ChemotionMcpConfig } from '../config.js';
 import {
@@ -57,13 +49,9 @@ const containerPayloadSchema = z
   .record(z.string(), z.unknown())
   .describe(
     'The Chemotion container Hash that carries the analyses tree. ' +
-      'For create, pass `EMPTY_ROOT_CONTAINER` if you are not attaching ' +
-      'analyses — minimal value: ' +
-      '`{"name":"new","container_type":"root","description":"",' +
-      '"extended_metadata":{},"attachments":[],"children":[]}`. ' +
-      'For update, fetch the entity first and pass back its existing ' +
-      '`container` — omitting it or passing an empty hash will nuke the ' +
-      'analyses tree on the server side.'
+      'Usually omit it: create uses an empty root container and update ' +
+      'keeps the current tree. Only pass it to edit analyses; the server ' +
+      'merges children and removes only those flagged `is_deleted: true`.'
   );
 
 const amountUnitSchema = z.enum(['g', 'mg', 'l', 'ml', 'mol', 'mmol']);
@@ -165,9 +153,10 @@ const reactionMaterialsSchema = z
       'reactants:[...], products:[...], solvents:[...]}`. ' +
       'Each entry references an existing sample by `id`, or mints a ' +
       'new sample inline by carrying the full sample shape. Participant rows can ' +
-      'also carry amount / volume / molarity fields. For update you MUST pass the ' +
-      'existing materials back if you are only editing other fields — Grape treats ' +
-      'the absent hash as empty.'
+      'also carry amount / volume / molarity fields. On update this REPLACES all ' +
+      'participants: rows left out are destroyed and fields left out of a row are ' +
+      'saved as empty. Start from `chem_get_update_payload`, or omit `materials` ' +
+      'to keep the current participants.'
   );
 
 // ---------------------------------------------------------------------
@@ -192,41 +181,6 @@ const reactionMaterialsSchema = z
 // MOVING the row instead of creating a new one. The original reaction
 // silently loses its link. Always emit the subsample shape, never the
 // bare id — that's what these helpers enforce.
-
-/** Clone the existing reaction materials into a mutable, PUT-safe shape. */
-function preserveReactionMaterials(
-  reaction: Reaction
-): Record<
-  'starting_materials' | 'reactants' | 'products' | 'solvents' | 'purification_solvents',
-  ReactionMaterialEntry[]
-> {
-  return {
-    starting_materials: (reaction.starting_materials ?? []).map(refToEntry),
-    reactants: (reaction.reactants ?? []).map(refToEntry),
-    products: (reaction.products ?? []).map(refToEntry),
-    solvents: (reaction.solvents ?? []).map(refToEntry),
-    purification_solvents: (reaction.purification_solvents ?? []).map(refToEntry),
-  };
-}
-
-function refToEntry(ref: ReactionSampleRef): ReactionMaterialEntry {
-  const entry: ReactionMaterialEntry = {};
-  if (ref.id != null) entry.id = ref.id;
-  if (ref.reference != null) entry.reference = ref.reference;
-  if (ref.equivalent != null) entry.equivalent = ref.equivalent;
-  if (ref.coefficient != null) entry.coefficient = ref.coefficient;
-  if (ref.position != null) entry.position = ref.position;
-  if (ref.real_amount_value != null) entry.real_amount_value = ref.real_amount_value;
-  if (ref.real_amount_unit != null) entry.real_amount_unit = ref.real_amount_unit;
-  if (ref.target_amount_value != null) entry.target_amount_value = ref.target_amount_value;
-  if (ref.target_amount_unit != null) entry.target_amount_unit = ref.target_amount_unit;
-  if (ref.molarity_value != null) entry.molarity_value = ref.molarity_value;
-  if (ref.molarity_unit != null) entry.molarity_unit = ref.molarity_unit;
-  if (ref.density != null) entry.density = ref.density;
-  if (ref.yield != null) entry.yield = ref.yield;
-  if (ref.waste != null) entry.waste = ref.waste;
-  return entry;
-}
 
 /** Build a subsample participant row for reactants / SMs / solvents. */
 function buildSubsampleEntry(args: {
@@ -709,6 +663,20 @@ async function patchResearchPlanFieldBlock(
   }
 }
 
+/** Re-number `position` after an insert so rows stay 0..n-1 in order. */
+function renumberPositions(rows: Array<Record<string, unknown>>): void {
+  rows.forEach((row, index) => {
+    row.position = index;
+  });
+}
+
+function lockedNote(response: { locked_sample_ids?: number[] } | undefined): string {
+  const locked = response?.locked_sample_ids;
+  return locked?.length
+    ? ` Samples kept because a reaction or wellplate still uses them: ${locked.map((id) => `#${id}`).join(', ')}.`
+    : '';
+}
+
 // ---------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------
@@ -849,13 +817,11 @@ export function registerWriteTools(
   server.tool(
     'chem_update_sample',
     'Patch fields on an existing sample. Any field omitted is left ' +
-      'unchanged. The Chemotion Grape contract requires `container` on ' +
-      'PUT — fetch `chem_get_update_payload(kind="sample", id=...)` ' +
-      'first and pass its `container` back unless you are intentionally ' +
-      'editing analyses. Returns the refreshed sample id + short_label.',
+      'unchanged, including the analyses `container`. Returns the ' +
+      'refreshed sample id + short_label.',
     {
       id: positiveInt,
-      container: containerPayloadSchema,
+      container: containerPayloadSchema.optional(),
       name: z.string().optional(),
       external_label: z.string().optional(),
       description: z.string().optional(),
@@ -882,12 +848,9 @@ export function registerWriteTools(
       ...sampleExtraFieldsSchema,
     },
     async (args) => {
-      const { id, container, ...rest } = args as {
-        id: number;
-        container: ContainerPayload;
-      } & Record<string, unknown>;
+      const { id, ...rest } = args as { id: number } & Record<string, unknown>;
       return guard(
-        () => client.updateSample(id, { container, ...rest }),
+        () => client.updateSample(id, rest),
         (response) => {
           const sample = response.sample;
           const label =
@@ -996,18 +959,17 @@ export function registerWriteTools(
 
   server.tool(
     'chem_update_reaction',
-    'Patch fields on an existing reaction. The Chemotion Grape ' +
-      'contract requires BOTH `materials` AND `container` on PUT — if ' +
-      'you are only editing other fields (name, temperature, …), fetch ' +
-      '`chem_get_update_payload(kind="reaction", id=...)` first and ' +
-      'pass its existing materials and container back. Omitting either ' +
-      'nukes the participant roles / analyses tree. Participant amount ' +
-      'and solvent-volume fields live inside the material rows, so keep ' +
-      'those too unless you intentionally want to replace them.',
+    'Patch fields on an existing reaction. Omit `materials` and ' +
+      '`container` to keep the current participants and analyses — the ' +
+      'tool sends the server\'s current values back. Pass `materials` only ' +
+      'to edit participants, starting from ' +
+      '`chem_get_update_payload(kind="reaction", id=...)`: it replaces ' +
+      'every role bucket. To add a participant use ' +
+      '`chem_attach_reaction_material` / `chem_attach_reaction_product`.',
     {
       id: positiveInt,
-      materials: reactionMaterialsSchema,
-      container: containerPayloadSchema,
+      materials: reactionMaterialsSchema.optional(),
+      container: containerPayloadSchema.optional(),
       name: z.string().optional(),
       description: z.record(z.string(), z.unknown()).optional(),
       observation: z.record(z.string(), z.unknown()).optional(),
@@ -1020,18 +982,12 @@ export function registerWriteTools(
       rxno: z.string().optional(),
     },
     async (args) => {
-      const { id, materials, container, ...rest } = args as {
+      const { id, ...rest } = args as {
         id: number;
-        materials: ReactionMaterials;
-        container: ContainerPayload;
+        materials?: ReactionMaterials;
       } & Record<string, unknown>;
       return guard(
-        () =>
-          client.updateReaction(id, {
-            materials,
-            container,
-            ...rest,
-          }),
+        () => client.updateReaction(id, rest),
         (response) => {
           const reaction = response.reaction;
           const label =
@@ -1127,7 +1083,6 @@ export function registerWriteTools(
       waste: z.boolean().optional(),
     },
     async (args) => {
-      if (!config.allowWrites) return writeDisabledResponse();
       const input = args as {
         reaction_id: number;
         role:
@@ -1152,10 +1107,12 @@ export function registerWriteTools(
       return guard(
         async () => {
           const { reaction } = await client.getReaction(input.reaction_id);
-          const materials = preserveReactionMaterials(reaction);
-          const bucket = materials[input.role] ?? [];
+          const materials = cloneReactionMaterials(reaction);
+          const bucket = materials[input.role];
           const position = input.position ?? bucket.length;
-          bucket.push(
+          bucket.splice(
+            Math.min(position, bucket.length),
+            0,
             buildSubsampleEntry({
               parent_id: input.source_sample_id,
               position,
@@ -1172,13 +1129,10 @@ export function registerWriteTools(
               waste: input.waste,
             })
           );
-          materials[input.role] = bucket;
-          const container =
-            (reaction.container as ContainerPayload | undefined) ??
-            EMPTY_ROOT_CONTAINER;
+          renumberPositions(bucket);
           return client.updateReaction(input.reaction_id, {
             materials,
-            container,
+            container: reaction.container as ContainerPayload | undefined,
           });
         },
         (response) => {
@@ -1280,7 +1234,6 @@ export function registerWriteTools(
         ),
     },
     async (args) => {
-      if (!config.allowWrites) return writeDisabledResponse();
       const input = args as {
         reaction_id: number;
         molfile?: string;
@@ -1312,10 +1265,12 @@ export function registerWriteTools(
       return guard(
         async () => {
           const { reaction } = await client.getReaction(input.reaction_id);
-          const materials = preserveReactionMaterials(reaction);
-          const bucket = materials.products ?? [];
+          const materials = cloneReactionMaterials(reaction);
+          const bucket = materials.products;
           const position = input.position ?? bucket.length;
-          bucket.push(
+          bucket.splice(
+            Math.min(position, bucket.length),
+            0,
             buildProductEntry({
               reaction_id: input.reaction_id,
               position,
@@ -1334,13 +1289,10 @@ export function registerWriteTools(
               sum_formula: input.sum_formula,
             })
           );
-          materials.products = bucket;
-          const container =
-            (reaction.container as ContainerPayload | undefined) ??
-            EMPTY_ROOT_CONTAINER;
+          renumberPositions(bucket);
           return client.updateReaction(input.reaction_id, {
             materials,
-            container,
+            container: reaction.container as ContainerPayload | undefined,
           });
         },
         (response) => {
@@ -1406,29 +1358,24 @@ export function registerWriteTools(
 
   server.tool(
     'chem_update_research_plan',
-    'Patch fields on an existing research plan. The Grape contract ' +
-      'requires `container` on PUT — fetch ' +
-      '`chem_get_update_payload(kind="research_plan", id=...)` first ' +
-      'and pass its existing container back unless you are explicitly ' +
-      'editing analyses. Replacing `body` replaces the entire block ' +
-      'array; there is no per-block patch. For single-field edits, ' +
+    'Patch fields on an existing research plan. Omitted fields stay ' +
+      'unchanged, including the analyses `container`. Sending `body` ' +
+      'replaces the entire block array; there is no per-block patch. ' +
+      'For single-field edits, ' +
       'prefer `chem_add_research_plan_field`, ' +
       '`chem_update_research_plan_field`, and ' +
       '`chem_delete_research_plan_field`.',
     {
       id: positiveInt,
-      container: containerPayloadSchema,
+      container: containerPayloadSchema.optional(),
       name: z.string().optional(),
       body: researchPlanBodySchema.optional(),
       wellplate_ids: z.array(z.number().int().positive()).optional(),
     },
     async (args) => {
-      const { id, container, ...rest } = args as {
-        id: number;
-        container: ContainerPayload;
-      } & Record<string, unknown>;
+      const { id, ...rest } = args as { id: number } & Record<string, unknown>;
       return guard(
-        () => client.updateResearchPlan(id, { container, ...rest }),
+        () => client.updateResearchPlan(id, rest),
         (response) => {
           const plan = response.research_plan;
           const name = plan?.name ?? `plan-${id}`;
@@ -1710,7 +1657,7 @@ export function registerWriteTools(
       readout_titles: z
         .array(z.record(z.string(), z.unknown()))
         .optional(),
-      container: containerPayloadSchema,
+      container: containerPayloadSchema.optional(),
     },
     async (args) => {
       const {
@@ -1723,16 +1670,16 @@ export function registerWriteTools(
         collection_id: number;
         name: string;
         wells?: Array<Record<string, unknown>>;
-        container: ContainerPayload;
+        container?: ContainerPayload;
       } & Record<string, unknown>;
       return guard(
         () =>
           client.createWellplate({
+            ...rest,
             collection_id,
             name,
             wells: wells ?? [],
-            container,
-            ...rest,
+            container: container ?? EMPTY_ROOT_CONTAINER,
           }),
         (response) => {
           const wp = response.wellplate;
@@ -1746,28 +1693,30 @@ export function registerWriteTools(
 
   server.tool(
     'chem_update_wellplate',
-    'Patch fields on an existing wellplate. The Grape contract requires ' +
-      '`container` on PUT — fetch `chem_get_update_payload(kind="wellplate", ' +
-      'id=...)` first and pass its existing container back unless you are ' +
-      'explicitly editing analyses. Replacing `wells` replaces the entire ' +
-      'well layout.',
+    'Patch fields on an existing wellplate. Omitted fields stay unchanged, ' +
+      'including `wells` and `container`. DANGER: `wells` replaces the whole ' +
+      'layout and Chemotion destroys the samples of every well you leave ' +
+      'out — start from `chem_get_update_payload(kind="wellplate", id=...)` ' +
+      'and keep every well when editing one.',
     {
       id: positiveInt,
-      container: containerPayloadSchema,
+      container: containerPayloadSchema.optional(),
       name: z.string().optional(),
-      wells: z.array(z.record(z.string(), z.unknown())).optional(),
+      wells: z
+        .array(z.record(z.string(), z.unknown()))
+        .optional()
+        .describe(
+          'Full well layout. Omit to keep it. Samples of wells missing here are destroyed.'
+        ),
       description: z.record(z.string(), z.unknown()).optional(),
       readout_titles: z
         .array(z.record(z.string(), z.unknown()))
         .optional(),
     },
     async (args) => {
-      const { id, container, ...rest } = args as {
-        id: number;
-        container: ContainerPayload;
-      } & Record<string, unknown>;
+      const { id, ...rest } = args as { id: number } & Record<string, unknown>;
       return guard(
-        () => client.updateWellplate(id, { container, ...rest }),
+        () => client.updateWellplate(id, rest),
         (response) => {
           const wp = response.wellplate;
           return text(
@@ -1785,9 +1734,8 @@ export function registerWriteTools(
   server.tool(
     'chem_create_screen',
     'Create a new screen. Screens group wellplates + research plans into ' +
-      'a single parameter-study workspace. Requires `name`, ' +
-      '`wellplate_ids` (may be `[]`), `research_plan_ids` (may be `[]`), ' +
-      'and `container`. Optional fields capture the classic screen ' +
+      'a single parameter-study workspace. Requires `name`; ' +
+      '`wellplate_ids` and `research_plan_ids` default to `[]`. Optional fields capture the classic screen ' +
       'metadata (collaborator, requirements, conditions, result). ' +
       'Returns the created screen id.',
     {
@@ -1795,14 +1743,16 @@ export function registerWriteTools(
       name: z.string().min(1),
       wellplate_ids: z
         .array(z.number().int().positive())
+        .optional()
         .describe(
-          'Existing wellplate ids to attach. Pass `[]` if none yet — you ' +
-            'can attach wellplates later via `chem_update_screen`.'
+          'Existing wellplate ids to attach. Default `[]` — you can attach ' +
+            'wellplates later via `chem_update_screen`.'
         ),
       research_plan_ids: z
         .array(z.number().int().positive())
-        .describe('Existing research plan ids to attach. Pass `[]` if none yet.'),
-      container: containerPayloadSchema,
+        .optional()
+        .describe('Existing research plan ids to attach. Default `[]`.'),
+      container: containerPayloadSchema.optional(),
       collaborator: z.string().optional(),
       requirements: z.string().optional(),
       conditions: z.string().optional(),
@@ -1825,18 +1775,18 @@ export function registerWriteTools(
         ...rest
       } = args as {
         name: string;
-        wellplate_ids: number[];
-        research_plan_ids: number[];
-        container: ContainerPayload;
+        wellplate_ids?: number[];
+        research_plan_ids?: number[];
+        container?: ContainerPayload;
       } & Record<string, unknown>;
       return guard(
         () =>
           client.createScreen({
-            name,
-            wellplate_ids,
-            research_plan_ids,
-            container,
             ...rest,
+            name,
+            wellplate_ids: wellplate_ids ?? [],
+            research_plan_ids: research_plan_ids ?? [],
+            container: container ?? EMPTY_ROOT_CONTAINER,
           }),
         (response) => {
           const s = response.screen;
@@ -1848,18 +1798,16 @@ export function registerWriteTools(
 
   server.tool(
     'chem_update_screen',
-    'Patch fields on an existing screen. The Grape contract requires ' +
-      '`wellplate_ids`, `research_plan_ids`, AND `container` on PUT — ' +
-      'fetch `chem_get_update_payload(kind="screen", id=...)` first and ' +
-      'pass back the current values unless you are explicitly editing ' +
-      'them. The wellplate attachment is reconciled by diff: ids in the ' +
+    'Patch fields on an existing screen. Omitted fields stay unchanged, ' +
+      'including `wellplate_ids`, `research_plan_ids`, and `container`. ' +
+      'The wellplate attachment is reconciled by diff: ids in the ' +
       'submitted list but not currently attached are attached, ids ' +
       'currently attached but not in the submitted list are detached.',
     {
       id: positiveInt,
-      wellplate_ids: z.array(z.number().int().positive()),
-      research_plan_ids: z.array(z.number().int().positive()),
-      container: containerPayloadSchema,
+      wellplate_ids: z.array(z.number().int().positive()).optional(),
+      research_plan_ids: z.array(z.number().int().positive()).optional(),
+      container: containerPayloadSchema.optional(),
       name: z.string().optional(),
       collaborator: z.string().optional(),
       requirements: z.string().optional(),
@@ -1869,26 +1817,9 @@ export function registerWriteTools(
       component_graph_data: z.record(z.string(), z.unknown()).optional(),
     },
     async (args) => {
-      const {
-        id,
-        wellplate_ids,
-        research_plan_ids,
-        container,
-        ...rest
-      } = args as {
-        id: number;
-        wellplate_ids: number[];
-        research_plan_ids: number[];
-        container: ContainerPayload;
-      } & Record<string, unknown>;
+      const { id, ...rest } = args as { id: number } & Record<string, unknown>;
       return guard(
-        () =>
-          client.updateScreen(id, {
-            wellplate_ids,
-            research_plan_ids,
-            container,
-            ...rest,
-          }),
+        () => client.updateScreen(id, rest),
         (response) => {
           const s = response.screen;
           return text(`Updated screen #${id} "${s?.name ?? ''}".`);
@@ -1906,8 +1837,8 @@ export function registerWriteTools(
       'chem_deletes_disabled',
       'Placeholder — destructive writes are disabled on this Chemotion ' +
         'MCP. Set CHEMOTION_ALLOW_DESTRUCTIVE=true (in addition to ' +
-        'CHEMOTION_ALLOW_WRITES) to enable hard-delete tools. ' +
-        'Chemotion has no soft-delete; `destroy` is irreversible.',
+        'CHEMOTION_ALLOW_WRITES) to enable delete tools. Deleted ' +
+        'elements cannot be restored through the API or UI.',
       {},
       async () =>
         errorText(
@@ -1919,9 +1850,9 @@ export function registerWriteTools(
 
   server.tool(
     'chem_delete_sample',
-    'HARD-DELETE a sample. Chemotion has no soft-delete — this is ' +
-      'permanent. The sample is removed from every collection it ' +
-      'belonged to, along with its container tree and attachments. ' +
+    'DELETE a sample. Chemotion only marks the row deleted, but nothing ' +
+      'in the API or UI restores it — treat it as permanent. The sample ' +
+      'disappears from every collection, with its analyses. ' +
       'Confirm with the user before invoking; a `chem_get_sample` ' +
       'first to show what is about to vanish is the courteous pattern.',
     {
@@ -1934,16 +1865,15 @@ export function registerWriteTools(
           await client.deleteSample(id);
           return id;
         },
-        () => text(`Hard-deleted sample #${id}.`)
+        () => text(`Deleted sample #${id}.`)
       );
     }
   );
 
   server.tool(
     'chem_delete_reaction',
-    'HARD-DELETE a reaction. Permanent. Removes the reaction and its ' +
-      'container tree; the referenced sample participants survive but ' +
-      'lose their link to this reaction. Confirm with the user before ' +
+    'DELETE a reaction. Not restorable through the API or UI. Removes ' +
+      'the reaction and its analyses. Confirm with the user before ' +
       'invoking.',
     {
       id: positiveInt,
@@ -1955,37 +1885,35 @@ export function registerWriteTools(
           await client.deleteReaction(id);
           return id;
         },
-        () => text(`Hard-deleted reaction #${id}.`)
+        () => text(`Deleted reaction #${id}.`)
       );
     }
   );
 
   server.tool(
     'chem_delete_research_plan',
-    'HARD-DELETE a research plan. Permanent. Chemotion has no per-id ' +
-      'delete for research plans, so this routes through the ui_state ' +
-      'bulk-delete endpoint scoped to the "all" collection — the plan ' +
-      'is removed from every collection it belonged to.',
+    'DELETE a research plan. Not restorable through the API or UI. ' +
+      'Chemotion has no per-id delete for research plans, so this routes ' +
+      'through the ui_state bulk-delete endpoint scoped to the "All" ' +
+      'collection. On v4 it is removed from your own collections and ' +
+      'destroyed once no collection holds it. Confirm with the user first.',
     {
       id: positiveInt,
     },
     async (args) => {
       const { id } = args as { id: number };
       return guard(
-        async () => {
-          await client.deleteResearchPlanByUiState(id);
-          return id;
-        },
-        () => text(`Hard-deleted research plan #${id}.`)
+        () => client.deleteResearchPlanByUiState(id),
+        (response) => text(`Deleted research plan #${id}.${lockedNote(response)}`)
       );
     }
   );
 
   server.tool(
     'chem_delete_wellplate',
-    'HARD-DELETE a wellplate. Permanent. Removes the wellplate and its ' +
-      'container tree; attached wells are cascaded, screen links are ' +
-      'severed but the screens themselves survive.',
+    'DELETE a wellplate. Not restorable through the API or UI. Removes ' +
+      'the wellplate, its wells and analyses; screens that used it ' +
+      'survive. Confirm with the user first.',
     {
       id: positiveInt,
     },
@@ -1996,29 +1924,26 @@ export function registerWriteTools(
           await client.deleteWellplate(id);
           return id;
         },
-        () => text(`Hard-deleted wellplate #${id}.`)
+        () => text(`Deleted wellplate #${id}.`)
       );
     }
   );
 
   server.tool(
     'chem_delete_screen',
-    'HARD-DELETE a screen. Permanent. Chemotion has no per-id delete ' +
-      'for screens (same situation as research plans), so this routes ' +
-      'through the ui_state bulk-delete endpoint scoped to the "all" ' +
-      'collection. Attached wellplates and research plans survive but ' +
-      'lose their link to this screen.',
+    'DELETE a screen. Not restorable through the API or UI. Chemotion ' +
+      'has no per-id delete for screens, so this routes through the ' +
+      'ui_state bulk-delete endpoint scoped to the "All" collection. ' +
+      'Attached wellplates and research plans survive. Confirm with the ' +
+      'user first.',
     {
       id: positiveInt,
     },
     async (args) => {
       const { id } = args as { id: number };
       return guard(
-        async () => {
-          await client.deleteScreenByUiState(id);
-          return id;
-        },
-        () => text(`Hard-deleted screen #${id}.`)
+        () => client.deleteScreenByUiState(id),
+        (response) => text(`Deleted screen #${id}.${lockedNote(response)}`)
       );
     }
   );

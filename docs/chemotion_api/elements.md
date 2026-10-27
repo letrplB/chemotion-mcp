@@ -24,11 +24,15 @@ Where `<plural>` is `samples`, `reactions`, `research_plans`,
 GET /api/v1/samples?collection_id=10&page=1&per_page=25
 ```
 
-- **`collection_id` is required.** No cross-collection list — use
-  `/search/*` for that.
-- Accepts optional `from_date`, `to_date` filters on `created_at`.
+- Pass `collection_id` (the client resolves `all` to the "All" id).
+  v4 lists everything the user can see when it is omitted.
+- `from_date` / `to_date` are **Integer Unix seconds** (the Grape desc
+  says "ms", the code calls `Time.zone.at`). They filter `updated_at`
+  unless `filter_created_at=true`. An ISO string gets a 400.
 - Samples-only: `product_only`, `molecule_sort`.
-- Response: `{samples: [...], pagination: {page, total_pages, total_count, per_page}}`.
+- Response body: `{samples: [...]}` (v4 adds `samples_count`). Totals
+  come from grape-kaminari **headers**: `X-Total`, `X-Total-Pages`,
+  `X-Page`, `X-Per-Page`. The client copies them into `pagination`.
 
 Same shape applies to `reactions`, `research_plans`, `wellplates`,
 `screens` — just swap the plural.
@@ -216,7 +220,7 @@ it replaces the entire block array in one shot.
 
 ```
 DELETE /api/v1/samples/:id
-→ {}  (hard delete, no soft-delete flag)
+→ {}  (soft delete via acts_as_paranoid, no restore route)
 DELETE /api/v1/reactions/:id
 → {}
 DELETE /api/v1/wellplates/:id
@@ -225,8 +229,10 @@ DELETE /api/v1/screens/:id
 → {}
 ```
 
-Straight hard deletes. Chemotion has no soft-delete concept on
-elements.
+Every element model uses `acts_as_paranoid`: rows get a
+`deleted_at` and vanish from the API, but nothing in the API or UI
+restores them, so treat deletes as permanent. On v4 only the owner can
+delete. (There is no per-id DELETE for screens either; see below.)
 
 ### Research plans: no per-id DELETE
 

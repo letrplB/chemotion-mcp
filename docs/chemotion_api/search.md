@@ -27,7 +27,7 @@ Content-Type: application/json
   guarantees a 400 "collection_id is missing".
 - `collection_id` = the literal string `"all"` is rejected with 400
   "collection_id is invalid". Resolve it client-side to the numeric
-  "All" id from `/collections/locked`. See
+  "All" id from the collection list. See
   [`collections.md`](./collections.md).
 - Server returns a per-kind bucket response:
   `{samples: {elements, totalElements, page, perPage, pages, error},
@@ -77,9 +77,9 @@ the plural.
 {
   "selection": {
     "elementType": "samples",
-    "search_type": "sub",                  (or "sim")
+    "search_type": "sub",                  (or "similar")
     "molfile": "...V2000 or V3000...",
-    "tanimoto_threshold": 0.7              (required for "sim", ignored for "sub")
+    "tanimoto_threshold": 0.7              (used by "similar", ignored for "sub")
   },
   "collection_id": "10",
   "page": 1,
@@ -88,9 +88,12 @@ the plural.
 ```
 
 - `search_type: "sub"` — substructure match, fingerprint-filtered.
-- `search_type: "sim"` — Tanimoto similarity over Morgan-like
+- `search_type: "similar"` — Tanimoto similarity over Morgan-like
   fingerprints. `tanimoto_threshold` ∈ [0, 1], defaults reasonable
   ≈ 0.7.
+- Grape validates `search_type` against exactly `similar` / `sub`;
+  `"sim"` is rejected with a 400. (Our tool sent `"sim"` until this was
+  caught in review, so similarity search never worked.)
 - Accepts **molfile only**. For SMILES, preconvert via
   `POST /molecules/smiles` → `{molfile, molecule, svg}` →
   forward the returned molfile.
@@ -137,8 +140,12 @@ be set** on our payload or every column surfaces "Your search for
 For `samples` table, allowed columns depend on collection
 `sample_detail_level`:
 - `external_label` — **always allowed**.
-- `name`, `short_label`, `molecular_weight`, etc. — allowed only
-  when `sample_detail_level > 0`.
+- `name`, `short_label`, `sum_formula`, `molecular_mass`, etc. —
+  allowed only when `sample_detail_level > 0`. The whitelist is
+  `API::WL_TABLES` in `app/api/api.rb`; there is no
+  `molecular_weight` column.
+- LIKE / ILIKE values are wrapped in `%…%` **and** run through
+  `sanitize_sql_like`, so a `%` you send is matched literally.
 
 For `reactions` table, `reaction_detail_level > -1` unlocks all
 columns.

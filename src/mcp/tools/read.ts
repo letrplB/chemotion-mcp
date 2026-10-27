@@ -43,6 +43,7 @@ import {
 import {
   collectionIdSchema,
   elementKindSchema,
+  errorText,
   guard,
   paginationArgsSchema,
   positiveInt,
@@ -164,11 +165,30 @@ function normalizeContainer(
   };
 }
 
+/**
+ * Participant row for the `chem_get_update_payload` starter. Carries
+ * every field Chemotion writes back onto an existing participant on
+ * PUT (anything missing is saved as nil) but leaves out the bulky
+ * `container` / `molecule`, which the server does not need.
+ */
 function reactionMaterialRefPayload(
   ref: ReactionSampleRef
 ): Record<string, unknown> {
   return compactRecord({
     id: ref.id,
+    name: ref.name,
+    short_label: ref.short_label,
+    external_label: ref.external_label,
+    show_label: ref.show_label,
+    metrics: ref.metrics,
+    solvent: ref.solvent,
+    dry_solvent: ref.dry_solvent,
+    residues: ref.residues,
+    gas_type: ref.gas_type,
+    gas_phase_data: ref.gas_phase_data,
+    conversion_rate: ref.conversion_rate,
+    weight_percentage: ref.weight_percentage,
+    weight_percentage_reference: ref.weight_percentage_reference,
     reference: ref.reference,
     equivalent: ref.equivalent,
     equivalents: ref.equivalents,
@@ -268,8 +288,7 @@ function summarizeResearchPlanField(
 function buildSampleUpdatePrep(sample: Sample): UpdatePrep {
   const { payload: container, usedFallback } = normalizeContainer(sample.container);
   const notes = [
-    'Fields omitted from `chem_update_sample` stay unchanged.',
-    'Keep `container` unless you are intentionally replacing the analyses tree.',
+    'Fields omitted from `chem_update_sample` stay unchanged; `container` may be omitted too.',
   ];
   if (usedFallback) {
     notes.unshift(
@@ -278,7 +297,7 @@ function buildSampleUpdatePrep(sample: Sample): UpdatePrep {
   }
   return {
     toolName: 'chem_update_sample',
-    required: ['container'],
+    required: [],
     notes,
     payload: compactRecord({
       id: sample.id,
@@ -316,9 +335,9 @@ function buildSampleUpdatePrep(sample: Sample): UpdatePrep {
 function buildReactionUpdatePrep(reaction: Reaction): UpdatePrep {
   const { payload: container, usedFallback } = normalizeContainer(reaction.container);
   const notes = [
-    'Chemotion requires BOTH `materials` and `container` on reaction PUTs.',
-    'Edit only the fields you want to change, but keep the returned `materials` and `container` unless you mean to replace them.',
-    'Participant rows may carry reagent amounts, solvent volumes, molarity, and density; preserve those fields unless you intentionally want to reset them.',
+    'Only send `materials` when you are changing participants; omit it (and `container`) and `chem_update_reaction` keeps the current ones.',
+    'When you do send `materials`, keep every row and every field shown here: Chemotion writes omitted participant fields back as empty and destroys participants left out of the payload.',
+    'To add a participant, prefer `chem_attach_reaction_material` / `chem_attach_reaction_product`; never add an existing sample id from another reaction (it moves that row).',
   ];
   if (usedFallback) {
     notes.unshift(
@@ -335,10 +354,15 @@ function buildReactionUpdatePrep(reaction: Reaction): UpdatePrep {
     purification_solvents: (reaction.purification_solvents ?? []).map(
       reactionMaterialRefPayload
     ),
+    // v4 sequence-based-macromolecule reactants: passed through whole,
+    // since leaving the bucket out destroys them.
+    ...(Array.isArray(reaction.reactant_sbmm_samples)
+      ? { reactant_sbmm_samples: jsonClone(reaction.reactant_sbmm_samples) }
+      : {}),
   };
   return {
     toolName: 'chem_update_reaction',
-    required: ['materials', 'container'],
+    required: [],
     notes,
     payload: compactRecord({
       id: reaction.id,
@@ -362,7 +386,7 @@ function buildResearchPlanUpdatePrep(plan: ResearchPlan): UpdatePrep {
   const { payload: container, usedFallback } = normalizeContainer(plan.container);
   const notes = [
     'Research-plan PUT replaces the entire `body` array when you send `body`.',
-    'Keep `container` unless you are intentionally editing the analyses tree.',
+    '`container` may be omitted; the current one is kept.',
   ];
   if (usedFallback) {
     notes.unshift(
@@ -371,7 +395,7 @@ function buildResearchPlanUpdatePrep(plan: ResearchPlan): UpdatePrep {
   }
   return {
     toolName: 'chem_update_research_plan',
-    required: ['container'],
+    required: [],
     notes,
     payload: compactRecord({
       id: plan.id,
@@ -390,8 +414,8 @@ function buildWellplateUpdatePrep(wellplate: Wellplate): UpdatePrep {
     wellplate.container
   );
   const notes = [
-    'Chemotion wellplate PUTs should carry `wells`, even when empty, to avoid a server-side nil crash.',
-    'Keep `container` unless you are intentionally editing the analyses tree.',
+    'Omit `wells` to keep the current layout. Sending `wells` replaces the layout, and Chemotion DESTROYS the samples of any well left out (an empty array deletes every sample in the plate).',
+    '`container` may be omitted; the current one is kept.',
   ];
   if (usedFallback) {
     notes.unshift(
@@ -400,7 +424,7 @@ function buildWellplateUpdatePrep(wellplate: Wellplate): UpdatePrep {
   }
   return {
     toolName: 'chem_update_wellplate',
-    required: ['container'],
+    required: [],
     notes,
     payload: compactRecord({
       id: wellplate.id,
@@ -416,8 +440,8 @@ function buildWellplateUpdatePrep(wellplate: Wellplate): UpdatePrep {
 function buildScreenUpdatePrep(screen: Screen): UpdatePrep {
   const { payload: container, usedFallback } = normalizeContainer(screen.container);
   const notes = [
-    'Chemotion requires `wellplate_ids`, `research_plan_ids`, and `container` on screen PUTs.',
-    'Attachment changes are diffed from the id arrays you send.',
+    '`wellplate_ids`, `research_plan_ids`, and `container` may be omitted; the current values are kept.',
+    'Wellplate links are diffed against the `wellplate_ids` you send.',
   ];
   if (usedFallback) {
     notes.unshift(
@@ -426,7 +450,7 @@ function buildScreenUpdatePrep(screen: Screen): UpdatePrep {
   }
   return {
     toolName: 'chem_update_screen',
-    required: ['wellplate_ids', 'research_plan_ids', 'container'],
+    required: [],
     notes,
     payload: compactRecord({
       id: screen.id,
@@ -514,8 +538,8 @@ function sampleSummary(sample: Sample): ListSummary {
   if (sample.short_label && sample.name) extras.push(['label', sample.short_label]);
   const formula = sample.molecule?.sum_formula ?? sample.molecular_formula;
   if (formula) extras.push(['formula', formula]);
-  const mw = sample.molecule?.molecular_weight ?? sample.molecular_weight;
-  if (mw != null) extras.push(['MW', `${Number(mw.toFixed(2))}`]);
+  const mw = Number(sample.molecule?.molecular_weight ?? sample.molecular_weight);
+  if (Number.isFinite(mw)) extras.push(['MW', `${Number(mw.toFixed(2))}`]);
   return { id: sample.id, label: name, extras };
 }
 
@@ -570,8 +594,8 @@ export function registerReadTools(
 
   server.tool(
     'chem_list_collections',
-    'List every collection visible to the caller (own + shared), as a flat summary. ' +
-      'Collections nest; use `chem_get_collection` on an id to see children. ' +
+    'List every collection visible to the caller (own + shared + the locked ' +
+      '"All" system collection), as a flat summary with parent links. ' +
       'Use a collection id from here as `collection_id` on the `chem_list_*` tools.',
     {},
     async () =>
@@ -579,16 +603,26 @@ export function registerReadTools(
         () => client.listCollections(),
         (response) => {
           const rows = (response.collections ?? response.roots ?? []).map(
-            (c) => ({
-              id: c.id,
-              label: c.label,
-              extras: [
-                c.is_shared ? (['', 'shared'] as [string, string]) : null,
-                c.children?.length
-                  ? ([`children`, String(c.children.length)] as [string, string])
-                  : null,
-              ].filter((e): e is [string, string] => e !== null),
-            })
+            (c) => {
+              // v4 rows are flat and linked by `ancestry` ("1/13");
+              // older releases nest them under `children`.
+              const parent =
+                typeof c.ancestry === 'string' && c.ancestry
+                  ? c.ancestry.split('/').pop()
+                  : undefined;
+              return {
+                id: c.id,
+                label: c.label,
+                extras: [
+                  parent ? (['parent', `#${parent}`] as [string, string]) : null,
+                  c.is_shared ? (['', 'shared'] as [string, string]) : null,
+                  c.is_locked ? (['', 'system'] as [string, string]) : null,
+                  c.children?.length
+                    ? ([`children`, String(c.children.length)] as [string, string])
+                    : null,
+                ].filter((e): e is [string, string] => e !== null),
+              };
+            }
           );
           return text(renderSummaryList('collection(s)', rows));
         }
@@ -628,8 +662,11 @@ export function registerReadTools(
       from_date: z
         .string()
         .optional()
-        .describe('Created-on filter, lower bound (ISO date).'),
-      to_date: z.string().optional().describe('Created-on filter, upper bound.'),
+        .describe('Created-on lower bound, ISO date (e.g. "2026-01-31").'),
+      to_date: z
+        .string()
+        .optional()
+        .describe('Created-on upper bound, ISO date (inclusive day).'),
       product_only: z
         .boolean()
         .optional()
@@ -652,6 +689,7 @@ export function registerReadTools(
             per_page: input.per_page ?? 25,
             from_date: input.from_date,
             to_date: input.to_date,
+            filter_created_at: input.from_date || input.to_date ? true : undefined,
             product_only: input.product_only,
           }),
         (response) => {
@@ -718,8 +756,14 @@ export function registerReadTools(
     {
       collection_id: collectionIdSchema,
       ...paginationArgsSchema,
-      from_date: z.string().optional(),
-      to_date: z.string().optional(),
+      from_date: z
+        .string()
+        .optional()
+        .describe('Created-on lower bound, ISO date (e.g. "2026-01-31").'),
+      to_date: z
+        .string()
+        .optional()
+        .describe('Created-on upper bound, ISO date (inclusive day).'),
     },
     async (args) => {
       const input = args as {
@@ -737,6 +781,7 @@ export function registerReadTools(
             per_page: input.per_page ?? 25,
             from_date: input.from_date,
             to_date: input.to_date,
+            filter_created_at: input.from_date || input.to_date ? true : undefined,
           }),
         (response) => {
           const rows = (response.reactions ?? []).map((r) => {
@@ -1004,8 +1049,9 @@ export function registerReadTools(
     'Cross-collection free-text search. Scope with `element_type` (default: all) ' +
       'to restrict to samples / reactions / wellplates / screens. Chemotion’s ' +
       'search is substring-based over name / short_label / description; for ' +
-      'substructure search use `chem_search_structure` (Phase 5) or for structured ' +
-      'filters use `chem_search_advanced`.',
+      'substructure search use `chem_search_structure`, for structured filters ' +
+      'use `chem_search_advanced`. Text search only returns samples from ' +
+      'collections where you have sample detail level > 0.',
     {
       query: z.string().min(1).describe('Substring to match against element names / labels / descriptions.'),
       element_type: z
@@ -1090,10 +1136,9 @@ export function registerReadTools(
       'molfile (preferred) or a SMILES string — SMILES is auto-converted via ' +
       '`/molecules/smiles` before dispatch. ' +
       '`search_type=sub` finds every sample whose structure contains the query ' +
-      'as a substructure (fingerprint-filtered). `search_type=sim` finds ' +
+      'as a substructure (fingerprint-filtered). `search_type=similar` finds ' +
       'structurally-similar samples; `tanimoto_threshold` (0.0–1.0, default 0.7) ' +
-      'controls strictness. Scope with `collection_id` (default `all`). ' +
-      'This is the differentiated capability — there is no elabftw equivalent.',
+      'controls strictness. Scope with `collection_id` (default `all`).',
     {
       molfile: z
         .string()
@@ -1110,10 +1155,13 @@ export function registerReadTools(
             'dispatch. Mutually exclusive with `molfile`.'
         ),
       search_type: z
-        .enum(['sub', 'sim'])
+        .preprocess(
+          (v) => (v === 'sim' ? 'similar' : v),
+          z.enum(['sub', 'similar'])
+        )
         .describe(
           '`sub` = substructure (exact substructure match, fingerprint-filtered). ' +
-            '`sim` = similarity (Tanimoto over Morgan-like fingerprints).'
+            '`similar` = similarity (Tanimoto over Morgan-like fingerprints).'
         ),
       tanimoto_threshold: z
         .number()
@@ -1121,7 +1169,7 @@ export function registerReadTools(
         .max(1)
         .optional()
         .describe(
-          'Similarity threshold for `search_type=sim`. Default 0.7. Ignored for `sub`.'
+          'Similarity threshold for `search_type=similar`. Default 0.7. Ignored for `sub`.'
         ),
       element_type: z
         .enum(['samples', 'reactions'])
@@ -1136,7 +1184,7 @@ export function registerReadTools(
       const input = args as {
         molfile?: string;
         smiles?: string;
-        search_type: 'sub' | 'sim';
+        search_type: 'sub' | 'similar';
         tanimoto_threshold?: number;
         element_type?: 'samples' | 'reactions';
         collection_id?: number | 'all';
@@ -1145,14 +1193,10 @@ export function registerReadTools(
       };
 
       if (!input.molfile && !input.smiles) {
-        return text(
-          'Error: either `molfile` or `smiles` must be provided.'
-        );
+        return errorText('either `molfile` or `smiles` must be provided.');
       }
       if (input.molfile && input.smiles) {
-        return text(
-          'Error: pass either `molfile` or `smiles`, not both.'
-        );
+        return errorText('pass either `molfile` or `smiles`, not both.');
       }
 
       return guard(
@@ -1179,11 +1223,9 @@ export function registerReadTools(
                 elementType: input.element_type ?? 'samples',
                 search_type: input.search_type,
                 molfile,
-                ...(input.search_type === 'sim' && input.tanimoto_threshold != null
-                  ? { tanimoto_threshold: input.tanimoto_threshold }
-                  : input.search_type === 'sim'
-                    ? { tanimoto_threshold: 0.7 }
-                    : {}),
+                ...(input.search_type === 'similar'
+                  ? { tanimoto_threshold: input.tanimoto_threshold ?? 0.7 }
+                  : {}),
               },
               page: input.page ?? 1,
               per_page: input.per_page ?? 25,
@@ -1236,13 +1278,15 @@ export function registerReadTools(
     'chem_search_advanced',
     'Advanced structured-filter search. Pass filter clauses as ' +
       '`filters: Array<{link, match, column, value}>`. ' +
-      '`column` is the string column name on the element table — common ' +
-      'allowed columns: `"external_label"` (always), plus `"name"` / ' +
-      '`"short_label"` / `"molecular_weight"` when the caller has ' +
-      'detail_level > 0 on that collection. ' +
+      '`column` is a column on the element table from Chemotion\'s whitelist, e.g. ' +
+      'samples: `external_label` (always), `name`, `short_label`, `sum_formula`, ' +
+      '`molecular_mass`, `location`, `description`, `purity`, `density` ' +
+      '(need sample detail_level > 0 on the collection); reactions: `name`, ' +
+      '`short_label`, `status`, `rxno`, `duration`, `plain_text_description`; ' +
+      'wellplates / screens / research_plans: `name`. ' +
       '`match` is a SQL op: `"LIKE"` / `"ILIKE"` for substring (Chemotion ' +
-      'wraps the value in `%…%` automatically — **do not** pre-wildcard ' +
-      'or you get `%%X%%`), `"="`, `"<"`, `">"` for exact / comparisons. ' +
+      'wraps the value in `%…%` itself and escapes any `%` you send — **do ' +
+      'not** add wildcards), `"="`, `"<"`, `">"`, `">="`, `"<="` for exact / comparisons. ' +
       '`link` chains clauses with `"AND"` / `"OR"` (empty string on the ' +
       'first clause). ' +
       'Example: `[{link:"", match:"LIKE", column:"external_label", value:"DMSN"}]`. ' +
@@ -1254,28 +1298,28 @@ export function registerReadTools(
         .array(
           z.object({
             link: z
-              .string()
+              .enum(['', 'AND', 'OR'])
               .default('')
               .describe(
                 'SQL linker to the previous clause. Empty string on the ' +
                   'first clause, "AND" / "OR" thereafter.'
               ),
             match: z
-              .string()
+              .enum(['=', 'LIKE', 'ILIKE', 'NOT LIKE', 'NOT ILIKE', '>', '<', '>=', '<='])
               .default('LIKE')
-              .describe('SQL op: LIKE / ILIKE / = / < / > …'),
+              .describe('SQL operator.'),
             column: z
               .string()
               .min(1)
               .describe(
                 'Column name on the element table (e.g. "external_label", ' +
-                  '"name", "short_label", "molecular_weight").'
+                  '"name", "short_label", "molecular_mass").'
               ),
             value: z
               .string()
               .describe(
-                'Literal to match. For LIKE/ILIKE include `%` wildcards: ' +
-                  '`"%DMSN%"`.'
+                'Value to match. For LIKE/ILIKE pass the bare substring ' +
+                  '(`"DMSN"`); Chemotion adds the wildcards.'
               ),
             label: z
               .string()
@@ -1289,7 +1333,7 @@ export function registerReadTools(
         .min(1)
         .describe('Filter clauses.'),
       element_type: z
-        .enum(['samples', 'reactions', 'wellplates', 'screens'])
+        .enum(['samples', 'reactions', 'wellplates', 'screens', 'research_plans'])
         .optional()
         .describe('Element kind (table name). Default `samples`.'),
       collection_id: collectionIdSchema
@@ -1310,7 +1354,8 @@ export function registerReadTools(
           | 'samples'
           | 'reactions'
           | 'wellplates'
-          | 'screens';
+          | 'screens'
+          | 'research_plans';
         collection_id?: number | 'all';
         page?: number;
         per_page?: number;
@@ -1352,6 +1397,7 @@ export function registerReadTools(
             'reactions',
             'wellplates',
             'screens',
+            'research_plans',
           ] as const) {
             const bucket = (response as Record<string, unknown>)[kind] as
               | {
@@ -1602,9 +1648,14 @@ export function registerReadTools(
       };
       return guard(
         async () => {
-          const factories = ids.map(
-            (id) => async () => ({ id, entity: await fetchEntity(client, kind, id) })
-          );
+          const factories = ids.map((id) => async () => {
+            try {
+              return { id, entity: await fetchEntity(client, kind, id) };
+            } catch (error) {
+              const reason = error instanceof Error ? error.message : String(error);
+              throw new Error(`${kind} #${id} failed: ${reason}`);
+            }
+          });
           return chunkedAll(factories, 8);
         },
         (results) => {

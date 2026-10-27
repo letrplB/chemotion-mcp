@@ -1,4 +1,5 @@
 import {
+  ChemotionApiError,
   type CookieJar,
   type HttpConfig,
   type RequestOptions,
@@ -8,39 +9,44 @@ import {
 } from './http.js';
 import {
   type Credentials,
+  adoptApiToken,
   adoptCookie,
   isSessionAlive,
   loginWithCredentials,
 } from './auth.js';
-import type {
-  Collection,
-  CollectionsListResponse,
-  ChemotionElementType,
-  Reaction,
-  ReactionCreateBody,
-  ReactionUpdateBody,
-  ReactionsListResponse,
-  ResearchPlan,
-  ResearchPlanCreateBody,
-  ResearchPlanUpdateBody,
-  ResearchPlansListResponse,
-  Sample,
-  SampleCreateBody,
-  SampleUpdateBody,
-  SamplesListResponse,
-  Screen,
-  ScreenCreateBody,
-  ScreenUpdateBody,
-  ScreensListResponse,
-  SearchRequest,
-  SearchResponse,
-  SearchSelection,
-  StructureSearchRequest,
-  User,
-  Wellplate,
-  WellplateCreateBody,
-  WellplateUpdateBody,
-  WellplatesListResponse,
+import {
+  type Collection,
+  type CollectionsListResponse,
+  type ChemotionElementType,
+  type Reaction,
+  type ReactionCreateBody,
+  type ReactionMaterials,
+  type ReactionUpdateBody,
+  type ReactionsListResponse,
+  type ResearchPlan,
+  type ResearchPlanCreateBody,
+  type ResearchPlanUpdateBody,
+  type ResearchPlansListResponse,
+  type Sample,
+  type SampleCreateBody,
+  type SampleUpdateBody,
+  type SamplesListResponse,
+  type Screen,
+  type ScreenCreateBody,
+  type ScreenUpdateBody,
+  type ScreensListResponse,
+  type SearchRequest,
+  type SearchResponse,
+  type SearchSelection,
+  type StructureSearchRequest,
+  type User,
+  type Wellplate,
+  type WellplateCreateBody,
+  type WellplateUpdateBody,
+  type WellplatesListResponse,
+  type ContainerPayload,
+  type Pagination,
+  EMPTY_ROOT_CONTAINER,
 } from './types.js';
 
 /**
@@ -64,9 +70,15 @@ export interface ChemotionConfig {
    */
   jar?: CookieJar;
   /**
+   * Personal API token (`chemtoken_…`, Chemotion v4+) or a JWT. Sent
+   * as `Authorization: Bearer`. Equivalent to calling `adoptApiToken`.
+   */
+  apiToken?: string;
+  /**
    * Called on 401 responses. Return `true` to retry the request
-   * once. Credentials-mode wires this to a re-login; cookie-mode
-   * leaves it unset so 401s surface to the caller.
+   * once. Credentials-mode wires this to a re-login; token and cookie
+   * mode leave it unset so 401s surface to the caller. Concurrent 401s
+   * share one in-flight call.
    */
   onUnauthorized?: () => Promise<boolean>;
   /** For testing. */
@@ -84,8 +96,14 @@ export interface ElementListQuery {
   /** 1-based. */
   page?: number;
   per_page?: number;
-  from_date?: string;
-  to_date?: string;
+  /**
+   * Lower date bound. ISO date string, `Date`, or Unix seconds — the
+   * API takes Unix seconds and the client converts. Filters on
+   * `updated_at` unless `filter_created_at` is true.
+   */
+  from_date?: string | number | Date;
+  /** Upper date bound (inclusive day). Same formats as `from_date`. */
+  to_date?: string | number | Date;
   user_label?: number;
   filter_created_at?: boolean;
   /** Samples-only filter: hide non-product samples in reactions. */
@@ -122,9 +140,12 @@ export class ChemotionClient {
       userAgent: config.userAgent,
       timeoutMs: config.timeoutMs,
       jar: config.jar ?? makeCookieJar(),
-      onUnauthorized: config.onUnauthorized,
+      onUnauthorized: config.onUnauthorized
+        ? singleFlight(config.onUnauthorized)
+        : undefined,
       fetchImpl: config.fetchImpl,
     };
+    if (config.apiToken) adoptApiToken(this.http, config.apiToken);
   }
 
   get baseUrl(): string {
@@ -147,6 +168,10 @@ export class ChemotionClient {
     adoptCookie(this.http.jar, rawCookie);
   }
 
+  adoptApiToken(token: string): void {
+    adoptApiToken(this.http, token);
+  }
+
   isSessionAlive(): Promise<boolean> {
     return isSessionAlive(this.http);
   }
@@ -165,34 +190,55 @@ export class ChemotionClient {
   // -----------------------------------------------------------------
 
   /**
-   * Aggregate the four collection-list endpoints Chemotion actually
-   * exposes: `/collections/roots` (caller's own tree),
-   * `/collections/shared_roots` (trees shared *with* the caller),
-   * `/collections/remote_roots` (federated / remote), and
-   * `/collections/locked` (the synthetic "All" / "chemotion-repository.net"
-   * pseudo-collections). There is no single `/collections` endpoint —
-   * it 405s. The four banks are merged into one response so callers
-   * (including the MCP tool layer) see a flat list.
+   * Every collection visible to the caller, as one flat list plus a
+   * per-origin breakdown.
    *
-   * The resulting envelope keeps a `roots` / `shared_roots` / etc.
-   * breakdown on top of the merged `collections` array so consumers
-   * that care about origin can still tell them apart.
+   * Chemotion v4 serves this from `GET /collections` as
+   * `{own: [...], shared_with_me: [...]}` — flat rows linked by
+   * `ancestry`, the locked "All" / "chemotion-repository.net" rows
+   * included in `own`. Older releases 405 on that route and instead
+   * expose four banks: `/collections/roots`, `/shared_roots`,
+   * `/remote_roots`, and `/locked`. We try v4 first and fall back.
    */
   async listCollections(): Promise<CollectionsListResponse> {
-    const fetchBank = async (
-      path: string
-    ): Promise<Collection[]> => {
+    try {
+      const response = await chemotionJson<{
+        own?: Collection[];
+        shared_with_me?: Collection[];
+      }>(this.http, '/collections');
+      if (Array.isArray(response?.own) || Array.isArray(response?.shared_with_me)) {
+        const own = response.own ?? [];
+        const shared = (response.shared_with_me ?? []).map((c) => ({
+          ...c,
+          is_shared: true,
+        }));
+        const roots = own.filter((c) => !c.is_locked);
+        const locked = own.filter((c) => c.is_locked);
+        return {
+          collections: [...roots, ...shared, ...locked],
+          roots,
+          shared_roots: shared,
+          remote_roots: [],
+          locked,
+        };
+      }
+    } catch (error) {
+      if (!isMissingRoute(error)) throw error;
+    }
+
+    const fetchBank = async (path: string): Promise<Collection[]> => {
       try {
         const response = await chemotionJson<{ collections?: Collection[] }>(
           this.http,
           path
         );
-        return response.collections ?? [];
-      } catch {
-        // Some banks return 404 on older builds (e.g. remote_roots
-        // before federation was added). Treat as empty rather than
-        // failing the whole aggregate.
-        return [];
+        return response?.collections ?? [];
+      } catch (error) {
+        // Some banks are missing on some builds (e.g. remote_roots
+        // before federation, synchronized collections removed). Treat
+        // those as empty, but let auth and server errors surface.
+        if (isMissingRoute(error)) return [];
+        throw error;
       }
     };
 
@@ -219,32 +265,25 @@ export class ChemotionClient {
 
   /**
    * Resolve the `'all'` pseudo-collection to its real numeric id on
-   * this instance. The "All" entry lives in `/collections/locked` and
-   * its id is per-user (collections are per-user rows in Chemotion,
-   * even the synthetic ones). Cached for the session since the id is
-   * stable once the user exists.
+   * this instance. The "All" row is a locked, per-user collection, so
+   * its id differs between users. Cached for the session.
    *
-   * The Chemotion JSON API rejects `collection_id=all` with a 400 —
-   * the string only makes sense inside the React UI's URL router.
-   * Every list/search call that takes a `collection_id` must pass
-   * this resolver's return value, never the literal `'all'`.
+   * Element and search endpoints take a numeric `collection_id`;
+   * every call that accepts `'all'` routes through here.
    */
   private allCollectionIdCache?: number;
   async resolveAllCollectionId(): Promise<number> {
     if (this.allCollectionIdCache !== undefined) {
       return this.allCollectionIdCache;
     }
-    const response = await chemotionJson<{ collections?: Collection[] }>(
-      this.http,
-      '/collections/locked'
-    );
-    const all = (response.collections ?? []).find(
-      (c) => c.label === 'All' || (c as { is_locked?: boolean }).is_locked === true
-    );
+    const { locked = [], collections = [] } = await this.listCollections();
+    const all =
+      locked.find((c) => c.label === 'All') ??
+      collections.find((c) => c.is_locked && c.label === 'All');
     if (!all || typeof all.id !== 'number') {
       throw new Error(
         "Could not locate the 'All' pseudo-collection on this instance. " +
-          "Try passing a real collection_id from chem_list_collections."
+          'Try passing a real collection_id from chem_list_collections.'
       );
     }
     this.allCollectionIdCache = all.id;
@@ -264,6 +303,46 @@ export class ChemotionClient {
     return this.resolveAllCollectionId();
   }
 
+  /**
+   * GET a paginated list endpoint. Chemotion paginates with
+   * grape-kaminari, which reports totals in `X-Total` /
+   * `X-Total-Pages` / `X-Page` / `X-Per-Page` response headers rather
+   * than the body; we surface them as `pagination` on the result.
+   * Date bounds are converted to the Unix seconds the API expects.
+   */
+  private async listJson<T extends { pagination?: Pagination }>(
+    path: string,
+    query: ElementListQuery
+  ): Promise<T> {
+    const { from_date, to_date, ...rest } = query;
+    const response = await chemotionFetch(this.http, path, {
+      query: {
+        ...rest,
+        from_date: toUnixSeconds(from_date),
+        to_date: toUnixSeconds(to_date),
+      },
+    });
+    const text = await response.text();
+    const body = (text ? JSON.parse(text) : {}) as T;
+    if (!body.pagination) {
+      const header = (name: string): number | undefined => {
+        const raw = response.headers.get(name);
+        const n = raw == null ? Number.NaN : Number(raw);
+        return Number.isFinite(n) ? n : undefined;
+      };
+      const pagination: Pagination = {
+        page: header('x-page'),
+        per_page: header('x-per-page'),
+        total_count: header('x-total'),
+        total_pages: header('x-total-pages'),
+      };
+      if (Object.values(pagination).some((v) => v !== undefined)) {
+        body.pagination = pagination;
+      }
+    }
+    return body;
+  }
+
   // -----------------------------------------------------------------
   // Samples
   // -----------------------------------------------------------------
@@ -281,9 +360,7 @@ export class ChemotionClient {
     const collection_id = await this.resolveCollectionId(
       query.collection_id
     );
-    return chemotionJson(this.http, '/samples', {
-      query: { ...query, collection_id },
-    });
+    return this.listJson<SamplesListResponse>('/samples', { ...query, collection_id });
   }
 
   /**
@@ -329,9 +406,7 @@ export class ChemotionClient {
     const collection_id = await this.resolveCollectionId(
       query.collection_id
     );
-    return chemotionJson(this.http, '/reactions', {
-      query: { ...query, collection_id },
-    });
+    return this.listJson<ReactionsListResponse>('/reactions', { ...query, collection_id });
   }
 
   getReaction(id: number): Promise<{ reaction: Reaction }> {
@@ -366,9 +441,7 @@ export class ChemotionClient {
     const collection_id = await this.resolveCollectionId(
       query.collection_id
     );
-    return chemotionJson(this.http, '/research_plans', {
-      query: { ...query, collection_id },
-    });
+    return this.listJson<ResearchPlansListResponse>('/research_plans', { ...query, collection_id });
   }
 
   getResearchPlan(id: number): Promise<{ research_plan: ResearchPlan }> {
@@ -385,9 +458,7 @@ export class ChemotionClient {
     const collection_id = await this.resolveCollectionId(
       query.collection_id
     );
-    return chemotionJson(this.http, '/wellplates', {
-      query: { ...query, collection_id },
-    });
+    return this.listJson<WellplatesListResponse>('/wellplates', { ...query, collection_id });
   }
 
   getWellplate(id: number): Promise<{ wellplate: Wellplate }> {
@@ -400,9 +471,7 @@ export class ChemotionClient {
     const collection_id = await this.resolveCollectionId(
       query.collection_id
     );
-    return chemotionJson(this.http, '/screens', {
-      query: { ...query, collection_id },
-    });
+    return this.listJson<ScreensListResponse>('/screens', { ...query, collection_id });
   }
 
   getScreen(id: number): Promise<{ screen: Screen }> {
@@ -664,24 +733,28 @@ export class ChemotionClient {
   }
 
   /**
-   * `PUT /api/v1/samples/:id` — partial update. Chemotion silently
-   * drops unknown params, so this takes a permissive Record. The
-   * Grape contract requires `container` on PUT as well — pass the
-   * sample's existing container back untouched if you are not
-   * editing analyses. `getSample(id)` returns the container on its
-   * response envelope.
+   * `PUT /api/v1/samples/:id` — partial update; omitted fields stay
+   * unchanged. Grape requires `container` on PUT; when the caller
+   * omits it we send the sample's current container back. Containers
+   * are merged server-side (only children flagged `is_deleted` are
+   * removed), so passing the fetched tree back is a no-op.
    */
-  updateSample(
+  async updateSample(
     id: number,
     body: SampleUpdateBody
   ): Promise<{ sample: Sample }> {
+    const container =
+      body.container ?? containerOf((await this.getSample(id)).sample);
     return chemotionJson(this.http, `/samples/${id}`, {
       method: 'PUT',
-      body,
+      body: { ...body, container },
     });
   }
 
-  /** `DELETE /api/v1/samples/:id` — hard delete. No soft-delete flag. */
+  /**
+   * `DELETE /api/v1/samples/:id`. Chemotion soft-deletes (sets
+   * `deleted_at`), but nothing in the API or UI restores the record.
+   */
   deleteSample(id: number): Promise<unknown> {
     return chemotionJson(this.http, `/samples/${id}`, { method: 'DELETE' });
   }
@@ -713,21 +786,28 @@ export class ChemotionClient {
 
   /**
    * `PUT /api/v1/reactions/:id` — partial update. Grape requires
-   * `materials` + `container` on PUT; pass the reaction's existing
-   * values back if you are only editing other fields. `getReaction`
-   * returns both on the response envelope.
+   * `materials` + `container` on PUT. Either one the caller omits is
+   * filled from the reaction's current state: materials are sent back
+   * as the full participant rows `getReaction` returned (see
+   * `cloneReactionMaterials` for why a trimmed copy is unsafe).
    */
-  updateReaction(
+  async updateReaction(
     id: number,
     body: ReactionUpdateBody
   ): Promise<{ reaction: Reaction }> {
+    let { materials, container } = body;
+    if (!materials || !container) {
+      const { reaction } = await this.getReaction(id);
+      materials ??= cloneReactionMaterials(reaction);
+      container ??= containerOf(reaction);
+    }
     return chemotionJson(this.http, `/reactions/${id}`, {
       method: 'PUT',
-      body,
+      body: { ...body, materials, container },
     });
   }
 
-  /** `DELETE /api/v1/reactions/:id` — hard delete. */
+  /** `DELETE /api/v1/reactions/:id` — soft-delete, not restorable via the API. */
   deleteReaction(id: number): Promise<unknown> {
     return chemotionJson(this.http, `/reactions/${id}`, { method: 'DELETE' });
   }
@@ -754,16 +834,19 @@ export class ChemotionClient {
 
   /**
    * `PUT /api/v1/research_plans/:id` — partial update. Grape requires
-   * `container`; pass the plan's existing container back if you are
-   * only editing `body` or `name`.
+   * `container`; omitted → the plan's current container is sent back.
+   * A `body` sent here replaces the whole block array.
    */
-  updateResearchPlan(
+  async updateResearchPlan(
     id: number,
     body: ResearchPlanUpdateBody
   ): Promise<{ research_plan: ResearchPlan }> {
+    const container =
+      body.container ??
+      containerOf((await this.getResearchPlan(id)).research_plan);
     return chemotionJson(this.http, `/research_plans/${id}`, {
       method: 'PUT',
-      body,
+      body: { ...body, container },
     });
   }
 
@@ -796,7 +879,7 @@ export class ChemotionClient {
    * ever need to bulk-delete them; for now keep single-entity
    * semantics.
    */
-  deleteResearchPlanByUiState(id: number): Promise<unknown> {
+  deleteResearchPlanByUiState(id: number): Promise<UiStateDeleteResponse> {
     return chemotionJson(this.http, '/ui_state/', {
       method: 'DELETE',
       body: {
@@ -830,29 +913,34 @@ export class ChemotionClient {
 
   /**
    * `PUT /api/v1/wellplates/:id` — partial update. Grape requires
-   * `container`; pass the wellplate's existing container back unless
-   * editing analyses.
+   * `container`; omitted → the current container is sent back.
    *
-   * Defensive default: the server-side `Usecases::Wellplates::Update`
-   * calls `WellplateUpdater.update_wells(well_data: params[:wells])`
-   * which NPEs when `params[:wells]` is nil (i.e. when the caller
-   * didn't pass any). Grape lists `wells` as optional on PUT but the
-   * usecase treats it as required. We default `wells: []` so the
-   * updater has an iterable to walk — an empty well array is a no-op
-   * in the wells layer.
+   * `wells` is NOT a patch: the server's `WellplateUpdater#update_wells`
+   * walks the submitted wells and then destroys every sample that sat
+   * in the plate but is missing from the payload. Sending `wells: []`
+   * would therefore delete all the plate's samples, and omitting it
+   * crashes older builds on a nil `wells`. When the caller omits
+   * `wells` we send the current layout back unchanged.
    */
-  updateWellplate(
+  async updateWellplate(
     id: number,
     body: WellplateUpdateBody
   ): Promise<{ wellplate: Wellplate }> {
-    const payload = { wells: [], ...body };
+    let { wells, container } = body;
+    if (!wells || !container) {
+      const { wellplate } = await this.getWellplate(id);
+      wells ??= structuredClone(
+        (wellplate.wells ?? []) as Array<Record<string, unknown>>
+      );
+      container ??= containerOf(wellplate);
+    }
     return chemotionJson(this.http, `/wellplates/${id}`, {
       method: 'PUT',
-      body: payload,
+      body: { ...body, wells, container },
     });
   }
 
-  /** `DELETE /api/v1/wellplates/:id` — hard delete. */
+  /** `DELETE /api/v1/wellplates/:id` — soft-delete, not restorable via the API. */
   deleteWellplate(id: number): Promise<unknown> {
     return chemotionJson(this.http, `/wellplates/${id}`, {
       method: 'DELETE',
@@ -878,18 +966,25 @@ export class ChemotionClient {
 
   /**
    * `PUT /api/v1/screens/:id` — partial update. Grape requires
-   * `wellplate_ids`, `research_plan_ids`, and `container`. The PUT
-   * handler reconciles wellplate attachment by diffing the submitted
-   * ids against the current ones, so passing a different list
-   * attaches / detaches wellplates accordingly.
+   * `wellplate_ids`, `research_plan_ids`, and `container`; any the
+   * caller omits are filled from the screen's current state. The PUT
+   * handler diffs `wellplate_ids` against the current links, so a
+   * different list attaches / detaches wellplates accordingly.
    */
-  updateScreen(
+  async updateScreen(
     id: number,
     body: ScreenUpdateBody
   ): Promise<{ screen: Screen }> {
+    let { wellplate_ids, research_plan_ids, container } = body;
+    if (!wellplate_ids || !research_plan_ids || !container) {
+      const { screen } = await this.getScreen(id);
+      wellplate_ids ??= idsOf(screen.wellplates);
+      research_plan_ids ??= idsOf(screen.research_plans);
+      container ??= containerOf(screen);
+    }
     return chemotionJson(this.http, `/screens/${id}`, {
       method: 'PUT',
-      body,
+      body: { ...body, wellplate_ids, research_plan_ids, container },
     });
   }
 
@@ -899,7 +994,7 @@ export class ChemotionClient {
    * `Collection.get_all_collection_for_user` sentinel so the screen
    * is wiped regardless of which collection the caller is viewing.
    */
-  deleteScreenByUiState(id: number): Promise<unknown> {
+  deleteScreenByUiState(id: number): Promise<UiStateDeleteResponse> {
     return chemotionJson(this.http, '/ui_state/', {
       method: 'DELETE',
       body: {
@@ -973,4 +1068,97 @@ export class ChemotionClient {
       page += 1;
     }
   }
+}
+
+/**
+ * Response of `DELETE /ui_state/`. On v4, `locked_sample_ids` lists
+ * samples kept back because a reaction or wellplate still uses them.
+ */
+export interface UiStateDeleteResponse {
+  selecteds?: unknown[];
+  locked_sample_ids?: number[];
+  [key: string]: unknown;
+}
+
+const MATERIAL_BUCKETS = [
+  'starting_materials',
+  'reactants',
+  'products',
+  'solvents',
+  'purification_solvents',
+  'reactant_sbmm_samples',
+] as const;
+
+/**
+ * Deep-copy a reaction's participant rows into a `materials` payload
+ * for `PUT /reactions/:id`, keeping every field the GET returned.
+ *
+ * Do not trim these rows. For existing participants the server's
+ * `Usecases::Reactions::UpdateMaterials` assigns `solvent`, `metrics`,
+ * `dry_solvent`, amounts, `show_label`, gas-phase and
+ * weight-percentage fields straight from the payload, so a field left
+ * out is written back as nil; a polymer sample without `residues`
+ * raises a 500; and any bucket left out — including
+ * `reactant_sbmm_samples` on v4 — has its samples destroyed. Sending
+ * the GET rows back verbatim is what the Chemotion UI does.
+ */
+export function cloneReactionMaterials(
+  reaction: Reaction
+): Record<(typeof MATERIAL_BUCKETS)[number], Array<Record<string, unknown>>> &
+  ReactionMaterials {
+  const materials: Record<string, Array<Record<string, unknown>>> = {};
+  for (const bucket of MATERIAL_BUCKETS) {
+    const rows = (reaction as Record<string, unknown>)[bucket];
+    if (bucket === 'reactant_sbmm_samples' && !Array.isArray(rows)) continue;
+    materials[bucket] = Array.isArray(rows)
+      ? structuredClone(rows as Array<Record<string, unknown>>)
+      : [];
+  }
+  return materials as ReturnType<typeof cloneReactionMaterials>;
+}
+
+function containerOf(entity: { container?: unknown }): ContainerPayload {
+  return entity.container && typeof entity.container === 'object'
+    ? structuredClone(entity.container as ContainerPayload)
+    : structuredClone(EMPTY_ROOT_CONTAINER);
+}
+
+function idsOf(rows: unknown): number[] {
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((row) => (row as { id?: unknown } | null)?.id)
+    .filter((id): id is number => typeof id === 'number');
+}
+
+function isMissingRoute(error: unknown): boolean {
+  return (
+    error instanceof ChemotionApiError &&
+    (error.statusCode === 404 || error.statusCode === 405)
+  );
+}
+
+/** Accepts Unix seconds, a `Date`, or a date string; returns Unix seconds. */
+function toUnixSeconds(
+  value: string | number | Date | undefined
+): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'number') return Math.floor(value);
+  if (value instanceof Date) return Math.floor(value.getTime() / 1000);
+  if (/^\d+$/.test(value)) return Number(value);
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) {
+    throw new Error(`Unparseable date "${value}". Use an ISO date like 2026-01-31.`);
+  }
+  return Math.floor(ms / 1000);
+}
+
+/** Collapse concurrent calls into one in-flight promise. */
+function singleFlight<T>(fn: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | undefined;
+  return () => {
+    pending ??= fn().finally(() => {
+      pending = undefined;
+    });
+    return pending;
+  };
 }

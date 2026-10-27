@@ -4,11 +4,27 @@ Collections are the primary scoping container for every element
 (samples, reactions, research plans, wellplates, screens). Everything
 interesting about Chemotion's API routes through a `collection_id`.
 
-## There is no `GET /collections`
+## Listing collections: v4 vs. older releases
 
-**`GET /api/v1/collections` returns 405.** The collection tree is
-split across four routes, each returning its own bank. To get the
-full picture, call all four and merge.
+**Chemotion v4.0.0** (2026-10) redesigned sharing (PR #2783, #3374) and
+replaced the collection routes:
+
+```
+GET /api/v1/collections
+→ {own: [OwnCollection...], shared_with_me: [SharedCollection...]}
+```
+
+Rows are **flat** and linked by `ancestry` (`"1/13"` = path of
+ancestor ids). Own rows carry `id, ancestry, position, label,
+tabs_segment, inventory_*, is_locked, shared`; shared rows add `owner,
+owner_name, permission_level (0–5), collection_share_id,
+shared_via_group`. The locked `All` / `chemotion-repository.net` rows
+are part of `own`. `GET /collections/:id` also accepts `all`.
+`/roots`, `/shared_roots`, `/remote_roots`, `/locked`, and every
+`sync_collection` route are gone.
+
+**Before v4**, `GET /api/v1/collections` returns 405 and the tree is
+split across four routes:
 
 | Route | Returns | Notes |
 |---|---|---|
@@ -22,16 +38,17 @@ carries `id`, `label`, `permission_level`, the five
 `*_detail_level` fields (one per element kind), optional `children`,
 optional `is_locked` / `is_shared` / `is_remote` booleans.
 
-Implementation: `ChemotionClient.listCollections()` fans out all four
-in parallel and exposes the merged list plus the per-bank breakdown.
+Implementation: `ChemotionClient.listCollections()` tries the v4 route
+first and falls back to the four banks on 404/405. Both paths return
+the same merged list plus a per-origin breakdown.
 
 ## The "All" pseudo-collection (verified)
 
 Every user has a synthetic `All` collection that aggregates every
 element visible to them (own + shared). This is a **real row** in
 the `collections` table on the server, not a global sentinel — **its
-id is per-user** and is only discoverable by reading
-`/collections/locked`.
+id is per-user**. Find it as the locked row labelled `All` in the
+collection list (`own` on v4, `/collections/locked` before).
 
 On the test deployment, the current user's `All` collection resolved
 to numeric id `10`. Expect a different value on every account.

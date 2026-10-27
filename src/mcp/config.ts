@@ -1,13 +1,18 @@
 /**
  * Env-var parsing for the Chemotion MCP server.
  *
- * Two mutually-exclusive auth modes:
+ * Three mutually-exclusive auth modes:
  *
  *   1. **Credentials mode**: `CHEMOTION_USERNAME` + `CHEMOTION_PASSWORD`.
- *      The MCP performs a Devise login at startup, holds the resulting
- *      session cookie, and refreshes on 401.
+ *      The MCP mints a JWT at startup (falling back to a Devise form
+ *      login on instances without a token route) and re-logs in on 401.
  *
- *   2. **Cookie mode**: `CHEMOTION_SESSION_COOKIE` — a raw `Cookie:`
+ *   2. **Token mode**: `CHEMOTION_API_TOKEN` — a personal API token
+ *      (`chemtoken_…`) created in the Chemotion profile (v4+, needs
+ *      2FA enabled on the account). Works for SSO accounts and expires
+ *      on the date chosen at creation.
+ *
+ *   3. **Cookie mode**: `CHEMOTION_SESSION_COOKIE` — a raw `Cookie:`
  *      header value (or a single `name=value` pair) copied out of a
  *      logged-in browser session. Works with every auth backend
  *      (local, Shibboleth, OIDC, ORCID, GitHub) but expires silently;
@@ -22,6 +27,7 @@
 
 export type ChemotionAuthConfig =
   | { mode: 'credentials'; username: string; password: string }
+  | { mode: 'token'; token: string }
   | { mode: 'cookie'; rawCookie: string };
 
 export interface ChemotionMcpConfig {
@@ -65,41 +71,41 @@ function optionalTrim(name: string): string | undefined {
 
 function parseAuth(): ChemotionAuthConfig {
   const rawCookie = optionalTrim('CHEMOTION_SESSION_COOKIE');
+  const token = optionalTrim('CHEMOTION_API_TOKEN');
   const username = optionalTrim('CHEMOTION_USERNAME');
   const password = optionalTrim('CHEMOTION_PASSWORD');
 
-  const hasCookie = !!rawCookie;
   const hasCreds = !!username && !!password;
   const partialCreds = !!(username || password) && !hasCreds;
-
-  if (hasCookie && hasCreds) {
-    throw new ChemotionMcpConfigError(
-      'Both CHEMOTION_SESSION_COOKIE and CHEMOTION_USERNAME/PASSWORD are set. ' +
-        'Pick one auth mode — cookie mode wins for SSO instances, ' +
-        'credentials mode is simpler for local accounts.'
-    );
-  }
 
   if (partialCreds) {
     throw new ChemotionMcpConfigError(
       'Credentials mode requires BOTH CHEMOTION_USERNAME and CHEMOTION_PASSWORD. ' +
-        `Currently set: ${username ? 'CHEMOTION_USERNAME' : ''}${username && password ? ' and ' : ''}${password ? 'CHEMOTION_PASSWORD' : ''}.`
+        `Currently set: ${username ? 'CHEMOTION_USERNAME' : 'CHEMOTION_PASSWORD'} only.`
     );
   }
 
-  if (hasCookie) {
-    return { mode: 'cookie', rawCookie };
+  const configured = [
+    hasCreds ? 'CHEMOTION_USERNAME/PASSWORD' : null,
+    token ? 'CHEMOTION_API_TOKEN' : null,
+    rawCookie ? 'CHEMOTION_SESSION_COOKIE' : null,
+  ].filter((name): name is string => name !== null);
+
+  if (configured.length > 1) {
+    throw new ChemotionMcpConfigError(
+      `Several auth modes are set (${configured.join(', ')}). Pick one.`
+    );
   }
 
-  if (hasCreds) {
-    return { mode: 'credentials', username, password };
-  }
+  if (hasCreds) return { mode: 'credentials', username, password };
+  if (token) return { mode: 'token', token };
+  if (rawCookie) return { mode: 'cookie', rawCookie };
 
   throw new ChemotionMcpConfigError(
-    'No auth configured. Set EITHER CHEMOTION_SESSION_COOKIE ' +
-      '(a cookie copied from a logged-in browser — works with any auth backend) ' +
-      'OR both CHEMOTION_USERNAME and CHEMOTION_PASSWORD ' +
-      '(MCP logs in and manages the session for local Chemotion accounts).'
+    'No auth configured. Set ONE of: ' +
+      'CHEMOTION_USERNAME + CHEMOTION_PASSWORD (local Chemotion accounts), ' +
+      'CHEMOTION_API_TOKEN (a personal API token from your Chemotion profile, v4+, works with SSO), ' +
+      'or CHEMOTION_SESSION_COOKIE (a cookie copied from a logged-in browser).'
   );
 }
 
@@ -118,8 +124,8 @@ export function loadConfig(): ChemotionMcpConfig {
   }
 
   const timeoutRaw = process.env.CHEMOTION_TIMEOUT_MS;
-  const parsedTimeout = timeoutRaw ? Number.parseInt(timeoutRaw, 10) : undefined;
-  const timeoutMs = Number.isFinite(parsedTimeout) ? parsedTimeout : undefined;
+  const parsedTimeout = timeoutRaw ? Number.parseInt(timeoutRaw, 10) : Number.NaN;
+  const timeoutMs = parsedTimeout > 0 ? parsedTimeout : undefined;
 
   const userAgent =
     optionalTrim('CHEMOTION_USER_AGENT') ?? 'sura-chemotion-mcp/0.1.0';

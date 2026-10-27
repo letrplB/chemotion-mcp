@@ -17,6 +17,7 @@ export type {
 
 export {
   ChemotionAuthError,
+  adoptApiToken,
   adoptCookie,
   isSessionAlive,
   loginWithCredentials,
@@ -86,3 +87,4 @@ export type {
   WellplatesListResponse,
 } from './types.js';
 export { ELEMENT_TYPE_PLURAL, EMPTY_ROOT_CONTAINER } from './types.js';
+export { cloneReactionMaterials } from './client.js';

@@ -1,14 +1,54 @@
 # Authentication
 
-Chemotion authenticates via Devise session cookies. Two usable modes:
+Chemotion's Grape API (`app/api/api.rb`) resolves the caller in this
+order:
 
-1. **Credentials mode** — client performs the sign-in dance and
-   manages the cookie.
-2. **Cookie mode** — operator copies a live session cookie out of
-   DevTools and the client adopts it as-is. Works with any auth
-   backend including SSO.
+1. the Devise **session cookie**,
+2. a personal **API token** (`chemtoken_…`) in `Authorization: Bearer`
+   (v4.0.0+),
+3. a **JWT** in `Authorization` (since at least v1.10).
 
-## Credentials flow (verified)
+The client exposes three modes on top of that:
+
+| Mode | Env | Mechanism | Works with SSO | Expiry |
+|---|---|---|---|---|
+| Credentials | `CHEMOTION_USERNAME` + `CHEMOTION_PASSWORD` | JWT from the token route, form login as fallback | no | 2 weeks (JWT), re-minted on 401 |
+| API token | `CHEMOTION_API_TOKEN` | `chemtoken_…` bearer | yes | 1–600 days, set at creation |
+| Cookie | `CHEMOTION_SESSION_COOKIE` | copied `_chemotion_session` | yes | silent |
+
+## JWT login (per source, all versions ≥ v1.10)
+
+```
+POST /api/v1/authentication/token      ← v4.0.0+ (PR #3143)
+POST /api/v1/public/token              ← v1.10 – v3.x, still present in v4
+Content-Type: application/json
+
+{"username": "<email or name_abbreviation>", "password": "<password>"}
+
+→ 201 {"token": "<jwt>"}   |   401 {"error": "401 Unauthorized"}
+```
+
+`Usecases::Authentication::BuildToken` matches `username` against the
+name abbreviation or the email and signs `{user_id, first_name,
+last_name}` with a two-week expiry. Send it on every call as
+`Authorization: Bearer <jwt>`. These routes are public (no CSRF, no
+cookie). The client tries the v4 route, then the legacy one, and only
+falls back to the form flow below when both are missing (404/405).
+
+## API tokens (per source, v4.0.0+)
+
+Created in the UI (Profile → API tokens) or with
+`POST /api/v1/users/auth_token {otp_attempt, expires_in_days, name}`.
+Creation requires two-factor authentication on the account: without
+2FA the route answers `401 "2FA is needed"`. Only the SHA-256 digest is
+stored; the plaintext `chemtoken_<64 hex>` is shown once. Revoke with
+`POST /api/v1/users/revoke_auth_token {id, otp_attempt}`.
+
+## Legacy fallback: Devise form login (verified, pre-v4)
+
+Only used when the instance has no token route. Kept because it was
+the first path we reverse-engineered and still works.
+
 
 Standard Devise sign-in, but with Chemotion-specific deviations that
 bit us hard during reverse-engineering.
@@ -98,7 +138,7 @@ Cookie-mode sessions expire silently — we surface the resulting 401
 to the caller instead of attempting a re-login, since we have no
 credentials to re-mint with.
 
-## Session verification (both modes)
+## Session verification (every mode)
 
 `GET /api/v1/users/current` is the canonical "am I logged in" probe.
 - 200 → session live
@@ -109,4 +149,6 @@ credentials to re-mint with.
 ## Reference
 
 Implementation: `src/client/auth.ts`.
-Probed against a live Chemotion 1.x deployment on 2026-04-24.
+Form flow probed against a live pre-v4 deployment on 2026-04-24.
+Token routes read from `ComPlat/chemotion_ELN` at v1.10.0, v3.1.3,
+and v4.0.0 (2026-10).

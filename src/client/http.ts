@@ -2,13 +2,16 @@
  * Low-level HTTP for the Chemotion ELN JSON API.
  *
  * Design choices:
- *   - Cookie jar, because Chemotion authenticates via Devise session cookies.
- *     Every request carries whatever the jar holds; every response's
- *     `Set-Cookie` updates the jar.
+ *   - Two credentials can ride on a request. `bearerToken` (a JWT from
+ *     `/authentication/token` or a `chemtoken_…` API token) goes out as
+ *     `Authorization: Bearer`; Chemotion's Grape helper accepts either.
+ *     The cookie jar carries Devise session cookies for cookie mode and
+ *     the legacy form-login fallback. Every response's `Set-Cookie`
+ *     updates the jar.
  *   - 401 → optional `onUnauthorized()` re-login hook. If the hook returns
  *     `true` (refresh succeeded), the original request is retried once.
- *     Credentials-mode wires this up; cookie-mode does not (we can't
- *     re-mint a session from an expired cookie).
+ *     Credentials-mode wires this up; cookie- and token-mode do not
+ *     (there is nothing to re-mint the credential from).
  *   - Two URL bases: most calls prepend `/api/v1` under the Grape tree;
  *     Devise's `/users/sign_in` lives at the Rails root, so login calls
  *     pass `rootPath: true`.
@@ -60,16 +63,6 @@ export interface CookieJar {
   /** Snapshot for diagnostics. */
   entries(): Array<[string, string]>;
 }
-
-const COOKIE_ATTRIBUTES = new Set([
-  'path',
-  'domain',
-  'expires',
-  'max-age',
-  'secure',
-  'httponly',
-  'samesite',
-]);
 
 export function makeCookieJar(): CookieJar {
   const cookies = new Map<string, string>();
@@ -127,6 +120,11 @@ export interface HttpConfig {
   userAgent?: string;
   timeoutMs?: number;
   jar: CookieJar;
+  /**
+   * Sent as `Authorization: Bearer <token>` when set. Holds a JWT
+   * minted by the credentials login or a user-supplied API token.
+   */
+  bearerToken?: string;
   /**
    * Called on 401 responses (except when `noRefresh` is set on the
    * call). Return `true` if a re-login succeeded and the request
@@ -242,6 +240,9 @@ async function doFetch(
 
   const cookieHeader = config.jar.toHeader();
   if (cookieHeader) headers.Cookie = cookieHeader;
+  if (config.bearerToken && !headers.Authorization) {
+    headers.Authorization = `Bearer ${config.bearerToken}`;
+  }
 
   let body: RawBody | undefined;
   if (options.rawBody !== undefined) {

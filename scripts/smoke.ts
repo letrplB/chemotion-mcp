@@ -11,6 +11,11 @@
  *   CHEMOTION_PASSWORD='...' \
  *   bun run smoke
  *
+ * Usage (API-token mode, Chemotion v4+):
+ *   CHEMOTION_BASE_URL=https://eln.example.org \
+ *   CHEMOTION_API_TOKEN='chemtoken_...' \
+ *   bun run smoke
+ *
  * Usage (cookie mode):
  *   CHEMOTION_BASE_URL=https://eln.example.org \
  *   CHEMOTION_SESSION_COOKIE='_chemotion_session=...; CSRF-TOKEN=...' \
@@ -27,7 +32,9 @@ async function main(): Promise<void> {
     `• auth mode: ${config.auth.mode}\n` +
       (config.auth.mode === 'credentials'
         ? `• username: ${config.auth.username}\n`
-        : '• cookie length: ' + config.auth.rawCookie.length + ' chars\n')
+        : config.auth.mode === 'token'
+          ? `• token length: ${config.auth.token.length} chars\n`
+          : `• cookie length: ${config.auth.rawCookie.length} chars\n`)
   );
 
   const client = new ChemotionClient({
@@ -37,12 +44,15 @@ async function main(): Promise<void> {
   });
 
   if (config.auth.mode === 'credentials') {
-    process.stdout.write('• logging in via POST /users/sign_in …\n');
+    process.stdout.write('• logging in (JWT token route, form-login fallback) …\n');
     await client.loginWithCredentials({
       username: config.auth.username,
       password: config.auth.password,
     });
-    process.stdout.write('  ✓ session cookie received\n');
+    process.stdout.write('  ✓ logged in\n');
+  } else if (config.auth.mode === 'token') {
+    process.stdout.write('• adopting API token …\n');
+    client.adoptApiToken(config.auth.token);
   } else {
     process.stdout.write('• adopting supplied cookie …\n');
     client.adoptCookie(config.auth.rawCookie);

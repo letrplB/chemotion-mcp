@@ -1,25 +1,27 @@
 /**
  * Authentication paths for Chemotion ELN.
  *
- * Two entry points:
- *   1. `loginWithCredentials(http, {username, password})` — performs the
- *      Devise sign-in dance. GET the root to collect any CSRF cookie,
- *      then POST `/users/sign_in` form-encoded (what the UI sends) and
- *      let the `Set-Cookie` response populate the jar. Optionally
- *      followed by a JSON retry if the form path didn't land a session
- *      cookie, since some Devise configs only honour JSON on that
- *      route.
- *   2. `adoptCookie(jar, rawCookie)` — parse a pre-supplied cookie
+ * Chemotion's Grape API resolves the caller from (in order) the Devise
+ * session cookie, a `chemtoken_…` API token (v4+), or a JWT, the last
+ * two read from the `Authorization` header. Entry points:
+ *   1. `loginWithCredentials(http, {username, password})` — mints a JWT
+ *      via `POST /api/v1/authentication/token` (v4+) or
+ *      `POST /api/v1/public/token` (v1.10 – v3.x) and stores it as the
+ *      bearer token. The JWT is valid for two weeks. Only when neither
+ *      route exists does it fall back to the Devise HTML form login
+ *      (`/users/sign_in`), which needs a scraped CSRF token.
+ *   2. `adoptApiToken(http, token)` — use a personal API token created
+ *      in the Chemotion profile (v4+). Works for SSO accounts too.
+ *   3. `adoptCookie(jar, rawCookie)` — parse a pre-supplied cookie
  *      string (what an SSO-auth'd user copies out of DevTools) and
  *      stuff it into the jar.
  *
  * Plus a shared probe, `isSessionAlive`, that hits `/api/v1/users/current`
- * to confirm the jar currently corresponds to a live session. This is
- * the single source of truth for "am I logged in?" — both modes call
- * it at startup.
+ * to confirm the configured credential works. This is the single source
+ * of truth for "am I logged in?" — every mode calls it at startup.
  *
- * None of these functions retain state beyond the jar the caller
- * passes in. The jar is the session.
+ * None of these functions retain state beyond the `HttpConfig` the
+ * caller passes in (its jar and bearer token).
  */
 
 import {
@@ -150,18 +152,53 @@ async function postSignIn(
 }
 
 /**
- * Log in with `username` (email OR `name_abbreviation` — Chemotion's
- * Devise config accepts either, case-sensitive) and password. On
- * success the `http.jar` holds a live session cookie.
+ * Mint a JWT from username + password. Tries the v4 route first, then
+ * the pre-v4 one. Returns `undefined` when neither route exists on the
+ * instance (404/405), so the caller can fall back to the form login.
+ * Throws `ChemotionAuthError` on rejected credentials.
+ */
+async function mintJwt(
+  http: HttpConfig,
+  creds: Credentials
+): Promise<string | undefined> {
+  for (const path of ['/authentication/token', '/public/token']) {
+    try {
+      const response = await chemotionJson<{ token?: unknown }>(http, path, {
+        method: 'POST',
+        noRefresh: true,
+        body: { username: creds.username, password: creds.password },
+      });
+      if (typeof response?.token === 'string' && response.token) {
+        return response.token;
+      }
+    } catch (error) {
+      if (!(error instanceof ChemotionApiError)) throw error;
+      if (error.statusCode === 401) {
+        throw new ChemotionAuthError(
+          'Chemotion rejected the username or password (401 from the token endpoint).',
+          'CHEMOTION_USERNAME accepts the email or the name abbreviation (case-sensitive). ' +
+            'If your instance uses SSO, create an API token in your Chemotion profile and set CHEMOTION_API_TOKEN instead.'
+        );
+      }
+      if (error.statusCode >= 500) throw error;
+      // 404/405/400: route missing or shaped differently on this build.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Log in with `username` (email OR `name_abbreviation` — Chemotion
+ * accepts either, case-sensitive) and password.
  *
  * Flow:
- *   1. GET `/users/sign_in` as HTML to absorb the `_chemotion_session`
- *      cookie AND scrape the `authenticity_token` from the form.
- *   2. POST `/users/sign_in` form-encoded with `user[login]` +
- *      `authenticity_token` (the UI shape).
- *   3. If the jar didn't gain a session cookie, retry JSON-encoded —
- *      some API-only Devise configs reject the form shape.
- *   4. Probe `/api/v1/users/current` to confirm the cookie works.
+ *   1. Mint a JWT (see `mintJwt`) and send it as a bearer token.
+ *   2. If the instance has no token route, fall back to the Devise form
+ *      login: GET `/users/sign_in` to absorb the session cookie and
+ *      scrape the `authenticity_token`, POST the form with
+ *      `user[login]`, and retry JSON-encoded if no session cookie
+ *      landed.
+ *   3. Probe `/api/v1/users/current` to confirm the credential works.
  *
  * Throws `ChemotionAuthError` with actionable hints.
  */
@@ -176,9 +213,34 @@ export async function loginWithCredentials(
     );
   }
 
-  // Start from a clean jar so we're not reusing a stale session cookie
-  // that would mislead `hasSessionCookie` into thinking we succeeded.
+  // Start from a clean slate so a stale cookie or token can't make a
+  // failed login look successful.
   http.jar.clear();
+  http.bearerToken = undefined;
+
+  const jwt = await mintJwt(http, creds);
+  if (jwt) {
+    http.bearerToken = jwt;
+  } else {
+    await loginWithDeviseForm(http, creds);
+  }
+
+  // Necessary, not sufficient — confirm we can actually read protected
+  // data with what we were handed.
+  const alive = await isSessionAlive(http);
+  if (!alive) {
+    throw new ChemotionAuthError(
+      'Login succeeded but /users/current still returns 401.',
+      'Check that CHEMOTION_USERNAME is an email the instance recognises and the account is active.'
+    );
+  }
+}
+
+/** Legacy fallback for instances without a token route. */
+async function loginWithDeviseForm(
+  http: HttpConfig,
+  creds: Credentials
+): Promise<void> {
   const scrapedToken = await fetchSignInPageToken(http);
   const authenticityToken = scrapedToken ?? readCookieCsrfToken(http.jar);
 
@@ -206,20 +268,18 @@ export async function loginWithCredentials(
       : 'sign_in returned 2xx but no session cookie landed';
     throw new ChemotionAuthError(
       `Login to Chemotion failed (${detail}).`,
-      'Verify CHEMOTION_USERNAME / CHEMOTION_PASSWORD. If your instance uses SSO (Shibboleth/OIDC/ORCID/GitHub), use CHEMOTION_SESSION_COOKIE mode instead.'
+      'Verify CHEMOTION_USERNAME / CHEMOTION_PASSWORD. If your instance uses SSO (Shibboleth/OIDC/ORCID/GitHub), use CHEMOTION_API_TOKEN (Chemotion v4+) or CHEMOTION_SESSION_COOKIE instead.'
     );
   }
+}
 
-  // Cookie jar has a session cookie, but that's necessary, not
-  // sufficient — some auth flows plant a half-baked cookie on
-  // rejected logins. Confirm we can actually read protected data.
-  const alive = await isSessionAlive(http);
-  if (!alive) {
-    throw new ChemotionAuthError(
-      'Login response set a session cookie but /users/current still returns 401.',
-      'Check that CHEMOTION_USERNAME is an email the instance recognises and the account is active.'
-    );
-  }
+/**
+ * Use a pre-issued bearer credential: a personal API token
+ * (`chemtoken_…`, created under Profile → API tokens in Chemotion v4+)
+ * or a JWT minted elsewhere.
+ */
+export function adoptApiToken(http: HttpConfig, token: string): void {
+  http.bearerToken = token.trim().replace(/^bearer\s+/i, '');
 }
 
 /**
